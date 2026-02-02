@@ -49,6 +49,7 @@ class MJCFCharModel(kin_char_model.KinCharModel):
                 rot_w = rot[..., 0].copy()
                 rot[..., 0:3] = rot[..., 1:]
                 rot[..., -1] = rot_w
+                rot = rot / np.linalg.norm(rot)
 
             if (body_index == 0):
                 curr_joint = self._build_root_joint()
@@ -182,17 +183,7 @@ class MJCFCharModel(kin_char_model.KinCharModel):
                       axis=None)
 
         return joint
-
-    def _label_dof_indices(self, joints):
-        dof_idx = 0
-        for curr_joint in joints:
-            if (curr_joint is not None):
-                dof_dim = curr_joint.get_dof_dim()
-                curr_joint.dof_idx = dof_idx
-                dof_idx += dof_dim
-        
-        return dof_idx
-
+    
     def _parse_default_joint_type(self, xml_node):
         joint_type_str = "hinge"
 
@@ -211,19 +202,9 @@ class MJCFCharModel(kin_char_model.KinCharModel):
                             break
 
         return joint_type_str
-
-    def _build_body_children_map(self):
-        num_joints = self.get_num_joints()
-        body_children = [[] for _ in range(num_joints)]
-        for j in range(num_joints):
-            parent_idx = self._parent_indices[j].item()
-            if (parent_idx != -1):
-                body_children[parent_idx].append(j)
-        
-        return body_children
-   
+    
     def _build_bodies_xml(self):
-        body_children = self._build_body_children_map()
+        body_children = self._build_body_children_map(self._parent_indices)
         bodies_xml = self._build_body_xml(body_children=body_children, body_id=0)
         return bodies_xml
 

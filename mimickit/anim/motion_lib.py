@@ -50,7 +50,13 @@ class MotionLib():
     def calc_motion_phase(self, motion_ids, times):
         motion_len = self._motion_lengths[motion_ids]
         loop_mode = self._motion_loop_modes[motion_ids]
-        phase = calc_phase(times=times, motion_len=motion_len, loop_mode=loop_mode)
+
+        phase = times / motion_len
+        phase_wrap = phase - torch.floor(phase)
+        wrap_mask = (loop_mode == motion.LoopMode.WRAP.value)
+        phase = torch.where(wrap_mask, phase_wrap, phase)
+            
+        phase = torch.clip(phase, 0.0, 1.0)
         return phase
 
     def calc_motion_frame(self, motion_ids, motion_times):
@@ -120,22 +126,14 @@ class MotionLib():
         return frame_idx0, frame_idx1, blend
     
     def _calc_loop_offset(self, motion_ids, times):
-        loop_mode = self._motion_loop_modes[motion_ids]
-        wrap_mask = (loop_mode == motion.LoopMode.WRAP.value)
-
-        wrap_motion_ids = motion_ids[wrap_mask]
-        times = times[wrap_mask]
-
-        motion_len = self._motion_lengths[wrap_motion_ids]
-        root_pos_deltas = self._motion_root_pos_delta[wrap_motion_ids]
+        motion_len = self._motion_lengths[motion_ids]
+        wrap_deltas = self._motion_wrap_delta[motion_ids]
 
         phase = times / motion_len
         phase = torch.floor(phase)
         phase = phase.unsqueeze(-1)
-        
-        root_pos_offset = torch.zeros((motion_ids.shape[0], 3), device=self._device)
-        root_pos_offset[wrap_mask] = phase * root_pos_deltas
 
+        root_pos_offset = phase * wrap_deltas
         return root_pos_offset
     
 
@@ -155,7 +153,7 @@ class MotionLib():
         self._motion_num_frames = []
         self._motion_lengths = []
         self._motion_loop_modes = []
-        self._motion_root_pos_delta = []
+        self._motion_wrap_delta = []
         self._motion_files = []
         
         self._motion_frames = []
@@ -186,8 +184,12 @@ class MotionLib():
             curr_len = 1.0 / fps * (num_frames - 1)
 
             root_pos, root_rot, joint_rot = self._extract_frame_data(frames)
-            root_pos_delta = root_pos[-1] - root_pos[0]
-            root_pos_delta[..., -1] = 0.0
+
+            if (loop_mode == motion.LoopMode.WRAP.value):
+                wrap_delta = root_pos[-1] - root_pos[0]
+                wrap_delta[..., -1] = 0.0
+            else:
+                wrap_delta = torch.zeros_like(root_pos[0])
 
             root_vel = torch.zeros_like(root_pos)
             root_vel[..., :-1, :] = fps * (root_pos[..., 1:, :] - root_pos[..., :-1, :])
@@ -206,7 +208,7 @@ class MotionLib():
             self._motion_num_frames.append(num_frames)
             self._motion_lengths.append(curr_len)
             self._motion_loop_modes.append(loop_mode)
-            self._motion_root_pos_delta.append(root_pos_delta)
+            self._motion_wrap_delta.append(wrap_delta)
             self._motion_files.append(curr_file)
                 
             self._motion_frames.append(frames)
@@ -226,7 +228,7 @@ class MotionLib():
         self._motion_lengths = torch.tensor(self._motion_lengths, dtype=torch.float32, device=self._device)
         self._motion_loop_modes = torch.tensor(self._motion_loop_modes, dtype=torch.int, device=self._device)
         
-        self._motion_root_pos_delta = torch.stack(self._motion_root_pos_delta, dim=0)
+        self._motion_wrap_delta = torch.stack(self._motion_wrap_delta, dim=0)
         
         self._motion_frames = np.concatenate(self._motion_frames, axis=0)
         self._motion_frames = torch.tensor(self._motion_frames, dtype=torch.float32, device=self._device)
@@ -268,16 +270,3 @@ class MotionLib():
             motion_weights = [1.0]
 
         return motion_files, motion_weights
-
-
-@torch.jit.script
-def calc_phase(times, motion_len, loop_mode):
-    phase = times / motion_len
-        
-    loop_wrap_mask = (loop_mode == motion.LoopMode.WRAP.value)
-    phase_wrap = phase[loop_wrap_mask]
-    phase_wrap = phase_wrap - torch.floor(phase_wrap)
-    phase[loop_wrap_mask] = phase_wrap
-        
-    phase = torch.clip(phase, 0.0, 1.0)
-    return phase

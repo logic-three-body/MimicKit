@@ -97,6 +97,9 @@ class CharEnv(sim_env.SimEnv):
         elif (file_ext == ".urdf"):
             import anim.urdf_char_model as urdf_char_model
             char_model = urdf_char_model.URDFCharModel(self._device)
+        elif (file_ext == ".usd"):
+            import anim.usd_char_model as usd_char_model
+            char_model = usd_char_model.USDCharModel(self._device)
         else:
             print("Unsupported character file format: {:s}".format(file_ext))
             assert(False)

@@ -65,5 +65,5 @@ class BaseEnv(abc.ABC):
     def get_env_time(self, env_ids=None):
         return 0.0
     
-    def get_diagnostics(self):
+    def record_diagnostics(self):
         return self._diagnostics

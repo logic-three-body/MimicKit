@@ -74,7 +74,7 @@ class BaseAgent(torch.nn.Module):
             if (output_iter):
                 test_info = self.test_model(self._test_episodes)
             
-            env_diag_info = self._env.get_diagnostics()
+            env_diag_info = self._env.record_diagnostics()
             self._log_train_info(train_info, test_info, env_diag_info, start_time) 
             self._logger.print_log()
 

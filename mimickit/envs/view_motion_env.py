@@ -69,7 +69,7 @@ class ViewMotionEnv(char_env.CharEnv):
         body_pos, body_rot = self._kin_char_model.forward_kinematics(root_pos=root_pos,
                                                                      root_rot=root_rot,
                                                                      joint_rot=joint_rot)
-
+        
         if (self._has_key_bodies()):
             self._ref_body_pos[:] = body_pos
 

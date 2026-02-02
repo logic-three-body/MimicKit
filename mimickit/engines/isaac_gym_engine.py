@@ -127,6 +127,9 @@ class IsaacGymEngine(engine.Engine):
                      color=None, disable_motors=False):
         segmentation_id = 0
 
+        _, file_ext = os.path.splitext(asset_file)
+        assert(file_ext == ".xml"), "Unsupported asset format for Isaac Gym: {:s}".format(file_ext)
+
         start_pose = gymapi.Transform()
 
         if (start_pos is not None):

@@ -102,7 +102,7 @@ class KinCharModel():
         assert(len(joints) == num_bodies)
 
         self._body_names = body_names
-        self._parent_indices = torch.tensor(parent_indices, device=self._device, dtype=torch.long)
+        self._parent_indices = np.array(parent_indices)
         self._local_translation = torch.tensor(np.array(local_translation), device=self._device, dtype=torch.float32)
         self._local_rotation = torch.tensor(np.array(local_rotation), device=self._device, dtype=torch.float32)
         self._joints = joints
@@ -292,12 +292,13 @@ class KinCharModel():
 
         return name_body_map
     
-    def _build_body_children_map(self):
-        num_joints = self.get_num_joints()
-        body_children = [[] for _ in range(num_joints)]
-        for j in range(num_joints):
-            parent_idx = self._parent_indices[j].item()
+    def _build_body_children_map(self, parent_indices):
+        num_bodies = len(parent_indices)
+        body_children = [[] for _ in range(num_bodies)]
+        for j in range(num_bodies):
+            parent_idx = parent_indices[j]
             if (parent_idx != -1):
                 body_children[parent_idx].append(j)
         
         return body_children
+   

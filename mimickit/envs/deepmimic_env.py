@@ -58,6 +58,20 @@ class DeepMimicEnv(char_env.CharEnv):
             if (self._log_tracking_error):
                 self._error_tracker.reset()
         return
+    
+    def record_diagnostics(self):
+        if (self._log_tracking_error):
+            err_stats = self._error_tracker.get_mean()
+            self._diagnostics["root_pos_err"] = err_stats[0]
+            self._diagnostics["root_rot_err"] = err_stats[1]
+            self._diagnostics["body_pos_err"] = err_stats[2]
+            self._diagnostics["body_rot_err"] = err_stats[3]
+            self._diagnostics["dof_vel_err"] = err_stats[4]
+            self._diagnostics["root_vel_err"] = err_stats[5]
+            self._diagnostics["root_ang_vel_err"] = err_stats[6]
+
+        diag = super().record_diagnostics()
+        return diag
 
     def _build_sim_tensors(self, env_config):
         super()._build_sim_tensors(env_config)
@@ -545,14 +559,6 @@ class DeepMimicEnv(char_env.CharEnv):
 
             self._error_tracker.update(tracking_error)
 
-            err_stats = self._error_tracker.get_mean()
-            self._diagnostics["root_pos_err"] = err_stats[0]
-            self._diagnostics["root_rot_err"] = err_stats[1]
-            self._diagnostics["body_pos_err"] = err_stats[2]
-            self._diagnostics["body_rot_err"] = err_stats[3]
-            self._diagnostics["dof_vel_err"] = err_stats[4]
-            self._diagnostics["root_vel_err"] = err_stats[5]
-            self._diagnostics["root_ang_vel_err"] = err_stats[6]
         return
     
     def _fetch_tar_obs_data(self, motion_ids, motion_times):

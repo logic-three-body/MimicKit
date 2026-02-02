@@ -996,7 +996,6 @@ class IsaacLabEngine(engine.Engine):
     
     def _build_ground_contact_sensors(self):
         from isaaclab.sensors import ContactSensorCfg, ContactSensor
-        from pxr import PhysxSchema
 
         ground_prim_paths = [GROUND_PATH + ".*"]
         
@@ -1007,20 +1006,7 @@ class IsaacLabEngine(engine.Engine):
         for obj_id in range(objs_per_env):
             # find child primitive that contains ContactReportAPI
             obj_path = OBJ_PATH_TEMPLATE.format(0, obj_id)
-            obj_prim = self._stage.GetPrimAtPath(obj_path)
-            prim_children = obj_prim.GetAllChildren()
-                
-            contact_prim_path = None
-            for prim_child in prim_children:
-                prim_grandchildren = prim_child.GetAllChildren()
-                
-                if (len(prim_grandchildren) > 0):
-                    prim_grandchild = prim_grandchildren[0]
-                    has_contact_api = prim_grandchild.HasAPI(PhysxSchema.PhysxContactReportAPI)
-                    
-                    if (has_contact_api):
-                        contact_prim_path = prim_child.GetPrimPath().pathString
-                        break
+            contact_prim_path = self._find_contact_prim_path(obj_path)
 
             if (contact_prim_path is not None):
                 contact_prim_name = os.path.basename(contact_prim_path)
@@ -1141,6 +1127,26 @@ class IsaacLabEngine(engine.Engine):
             assert(False), "No physics scene found! Please make sure one exists."
         
         return physics_scene_path
+    
+    def _find_contact_prim_path(self, obj_path):
+        from pxr import PhysxSchema
+
+        obj_prim = self._stage.GetPrimAtPath(obj_path)
+        prim_children = obj_prim.GetAllChildren()
+                
+        contact_prim_path = None
+        for prim_child in prim_children:
+            prim_grandchildren = prim_child.GetAllChildren()
+                
+            if (len(prim_grandchildren) > 0):
+                prim_grandchild = prim_grandchildren[0]
+                has_contact_api = prim_grandchild.HasAPI(PhysxSchema.PhysxContactReportAPI)
+                    
+                if (has_contact_api):
+                    contact_prim_path = prim_child.GetPrimPath().pathString
+                    break
+        
+        return contact_prim_path
     
     def _on_keyboard_event(self, event):
         if (event.type == carb.input.KeyboardEventType.KEY_PRESS):

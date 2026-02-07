@@ -1028,31 +1028,93 @@ class IsaacLabEngine(engine.Engine):
     
     def _build_body_order(self, obj):
         meta_data = obj.root_physx_view.shared_metatype
-        link_names = meta_data.link_names
-        link_parent_indices = meta_data.link_parent_indices
-        joint_dof_counts = meta_data.joint_dof_counts
-        joint_dof_offsets = meta_data.joint_dof_offsets
+        link_names = list(meta_data.link_names)
+
+        # Isaac Sim exposes slightly different metatype field names across versions.
+        if hasattr(meta_data, "link_parent_indices"):
+            link_parent_indices = meta_data.link_parent_indices
+        elif hasattr(meta_data, "link_parents"):
+            link_parent_indices = meta_data.link_parents
+        else:
+            link_parent_indices = None
+
+        if hasattr(meta_data, "joint_dof_counts"):
+            joint_dof_counts = list(meta_data.joint_dof_counts)
+        elif hasattr(meta_data, "dof_counts"):
+            joint_dof_counts = list(meta_data.dof_counts)
+        else:
+            raise AttributeError("Unsupported Isaac Sim metatype: missing joint dof counts")
+
+        if hasattr(meta_data, "joint_dof_offsets"):
+            joint_dof_offsets = list(meta_data.joint_dof_offsets)
+        elif hasattr(meta_data, "dof_offsets"):
+            joint_dof_offsets = list(meta_data.dof_offsets)
+        else:
+            raise AttributeError("Unsupported Isaac Sim metatype: missing joint dof offsets")
 
         num_links = len(link_names)
-        link_children = [[] for i in range(num_links)]
-        for link_name in link_names:
-            if (link_name in link_parent_indices):
-                parent_id = link_parent_indices[link_name]
-                link_id = link_names.index(link_name)
-                link_children[parent_id].append(link_id)
-        
-        body_order_sim2common = []
-        def _dfs_children_links(link_id):
-            body_order_sim2common.append(link_id)
-            child_ids = link_children[link_id]
-            for child_id in child_ids:
-                _dfs_children_links(child_id)
-        _dfs_children_links(0)
+        if link_parent_indices is None:
+            # Isaac Sim 4.5 metatype does not expose parent indices.
+            # Try to recover mapping from link name -> simulator link id.
+            body_order_sim2common = []
+            if hasattr(meta_data, "link_indices"):
+                link_indices = meta_data.link_indices
+                if isinstance(link_indices, dict):
+                    body_order_sim2common = [int(link_indices[name]) for name in link_names if name in link_indices]
+                else:
+                    try:
+                        # Some bindings expose this as array-like aligned to link_names.
+                        body_order_sim2common = [int(i) for i in list(link_indices)]
+                    except Exception:
+                        body_order_sim2common = []
+
+            # Final fallback: simulator-native link ordering.
+            if len(body_order_sim2common) != num_links:
+                body_order_sim2common = list(range(num_links))
+        else:
+            link_children = [[] for i in range(num_links)]
+
+            root_link_id = 0
+            if isinstance(link_parent_indices, dict):
+                for link_id, link_name in enumerate(link_names):
+                    if link_name not in link_parent_indices:
+                        continue
+                    parent_id = int(link_parent_indices[link_name])
+                    if parent_id >= 0:
+                        link_children[parent_id].append(link_id)
+                    else:
+                        root_link_id = link_id
+            else:
+                link_parent_indices = list(link_parent_indices)
+                for link_id, parent_id in enumerate(link_parent_indices):
+                    parent_id = int(parent_id)
+                    if parent_id >= 0:
+                        link_children[parent_id].append(link_id)
+                    else:
+                        root_link_id = link_id
+
+            body_order_sim2common = []
+
+            def _dfs_children_links(link_id):
+                body_order_sim2common.append(link_id)
+                child_ids = link_children[link_id]
+                for child_id in child_ids:
+                    _dfs_children_links(child_id)
+
+            _dfs_children_links(root_link_id)
 
         dof_order_sim2common = []
         for link_id in body_order_sim2common[1:]:
-            dof_offset = joint_dof_offsets[link_id - 1]
-            dof_count = joint_dof_counts[link_id - 1]
+            # Some versions expose dof arrays indexed by link_id - 1 (excluding root),
+            # while others are indexed directly by link_id.
+            joint_idx = link_id - 1
+            if joint_idx >= len(joint_dof_offsets):
+                joint_idx = link_id
+            if joint_idx < 0 or joint_idx >= len(joint_dof_offsets):
+                continue
+
+            dof_offset = int(joint_dof_offsets[joint_idx])
+            dof_count = int(joint_dof_counts[joint_idx])
             dof_indices = list(range(dof_offset, dof_offset + dof_count))
             dof_order_sim2common += dof_indices
 

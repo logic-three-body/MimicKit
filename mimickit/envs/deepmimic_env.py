@@ -857,14 +857,14 @@ def compute_tracking_error(root_pos, root_rot, body_rot, body_pos,
     tar_body_pos = tar_body_pos - tar_root_pos.unsqueeze(-2)
 
     root_pos_diff = tar_root_pos - root_pos
-    root_pos_err = torch.linalg.vector_norm(root_pos_diff, dim=-1)
+    root_pos_err = torch.norm(root_pos_diff, p=2, dim=-1)
 
     body_rot_diff = torch_util.quat_diff_angle(body_rot, tar_body_rot)
     body_rot_err = torch.abs(body_rot_diff)
     body_rot_err = torch.mean(body_rot_err, dim=-1)
 
     body_pos_diff = tar_body_pos - body_pos
-    body_pos_diff_l2 = torch.linalg.vector_norm(body_pos_diff, dim=-1)
+    body_pos_diff_l2 = torch.norm(body_pos_diff, p=2, dim=-1)
     body_pos_err = torch.mean(body_pos_diff_l2, dim=-1)
 
     root_rot_diff = torch_util.quat_diff_angle(root_rot, tar_root_rot)

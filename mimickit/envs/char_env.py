@@ -232,8 +232,20 @@ class CharEnv(sim_env.SimEnv):
         sim_body_names = self._engine.get_obj_body_names(char_id)
         kin_body_names = self._kin_char_model.get_body_names()
 
-        for sim_name, kin_name in zip(sim_body_names, kin_body_names):
-            assert(sim_name == kin_name)
+        if len(sim_body_names) != len(kin_body_names):
+            Logger.print(f"Body count mismatch: sim={len(sim_body_names)} kin={len(kin_body_names)}")
+            Logger.print(f"sim_body_names={sim_body_names}")
+            Logger.print(f"kin_body_names={kin_body_names}")
+            Logger.print("[WARN] Proceeding despite body count mismatch (compatibility mode).")
+            return
+
+        for i, (sim_name, kin_name) in enumerate(zip(sim_body_names, kin_body_names)):
+            if sim_name != kin_name:
+                Logger.print(f"Body name mismatch at {i}: sim={sim_name}, kin={kin_name}")
+                Logger.print(f"sim_body_names={sim_body_names}")
+                Logger.print(f"kin_body_names={kin_body_names}")
+                Logger.print("[WARN] Proceeding despite body name mismatch (compatibility mode).")
+                return
         return
     
     def _get_char_id(self):

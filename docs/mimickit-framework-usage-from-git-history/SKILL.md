@@ -1,6 +1,6 @@
 ---
 name: mimickit-framework-usage-from-git-history
-description: Use MimicKit effectively for training/testing across Newton, Isaac Lab, and Isaac Gym backends using a workflow distilled from this repository's git history and change hotspots. Use when a user asks to run MimicKit, choose env/agent/arg configs, switch backends, debug runtime failures, or triage regressions with git-derived priorities.
+description: Use MimicKit effectively for training/testing across Newton, Isaac Lab, and Isaac Gym backends using a workflow distilled from this repository's git history and change hotspots. Use when a user asks to run MimicKit, choose env/agent/arg configs, switch backends, debug runtime failures, triage regressions with git-derived priorities, or keep long-running training alive across unstable SSH connections with tmux.
 ---
 
 # MimicKit Framework Usage (Git-History Derived)
@@ -68,6 +68,34 @@ Run a minimal smoke test:
 - short episode count if available
 
 Scale to training only after this passes.
+
+### 5. Run long training inside tmux
+
+Use tmux by default for `--mode train` jobs.
+
+Start a named session:
+```bash
+tmux new -s mk_train_newton_exp01
+```
+
+Run training inside the tmux window:
+```bash
+python mimickit/run.py --arg_file args/deepmimic_humanoid_ppo_args.txt --engine_config data/engines/newton_engine.yaml --mode train --num_envs 1024 --visualize false
+```
+
+Detach safely before disconnecting:
+- press `Ctrl+b`, release, then press `d`
+
+Recover after reconnect:
+```bash
+tmux ls
+tmux attach -t mk_train_newton_exp01
+```
+
+Use split panes for monitoring:
+- `Ctrl+b` then `%` for left/right split
+- `Ctrl+b` then `"` for top/bottom split
+- run `watch -n 1 nvidia-smi` or `nvtop` in a second pane
 
 ## Method-to-Config Map
 
@@ -141,6 +169,12 @@ python mimickit/run.py --arg_file args/deepmimic_humanoid_ppo_args.txt --engine_
 Multi-device training:
 ```bash
 python mimickit/run.py --arg_file args/deepmimic_humanoid_ppo_args.txt --devices cuda:0 cuda:1 --mode train
+```
+
+Train in tmux (recommended for long jobs):
+```bash
+tmux new -s mk_train_amp_exp01
+python mimickit/run.py --arg_file args/amp_humanoid_args.txt --engine_config data/engines/newton_engine.yaml --mode train --num_envs 1024 --visualize false
 ```
 
 ## Output Checklist

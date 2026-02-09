@@ -1,6 +1,6 @@
 ---
 name: mimickit-wsl-newton-setup
-description: Configure MimicKit in WSL with Newton backend only (no Isaac Gym/Isaac Lab). Use when cloning MimicKit into Ubuntu WSL, creating a clean conda environment, installing Newton + MuJoCo/Warp dependencies, validating GPU import/runtime, and handling known blockers such as conda ToS and missing motion data pack.
+description: Configure MimicKit in WSL with Newton backend only (no Isaac Gym/Isaac Lab). Use when cloning MimicKit into Ubuntu WSL, creating a clean conda environment, installing Newton + MuJoCo/Warp dependencies, validating GPU import/runtime, running long training in tmux, and handling known blockers such as conda ToS and missing motion data pack.
 ---
 
 # MimicKit WSL Newton Setup
@@ -176,6 +176,46 @@ python mimickit/run.py \
 
 If runtime fails with missing file under `data/motions/...`, install data pack first.
 
+## Long-Run Training in tmux
+
+Use tmux for any Newton training that is expected to run longer than a short smoke test.
+
+Start a named session:
+```bash
+tmux new -s mk_newton_train_exp01
+```
+
+Run training inside tmux:
+```bash
+conda activate "$ENV_NAME"
+cd "$MIMICKIT_DIR"
+python mimickit/run.py \
+  --arg_file args/deepmimic_humanoid_ppo_args.txt \
+  --engine_config data/engines/newton_engine.yaml \
+  --mode train \
+  --num_envs 1024 \
+  --visualize false \
+  --devices cuda:0
+```
+
+Detach safely before closing SSH:
+- press `Ctrl+b`, release, then press `d`
+
+Re-attach after reconnect:
+```bash
+tmux ls
+tmux attach -t mk_newton_train_exp01
+```
+
+Use two panes for stability checks:
+- training pane: `python mimickit/run.py ...`
+- monitor pane: `watch -n 1 nvidia-smi` or `nvtop`
+
+Read old logs in tmux copy mode:
+- press `Ctrl+b`, then `[`
+- scroll with arrows/PageUp/PageDown
+- press `q` to exit copy mode
+
 ## Known blockers and fixes
 
 1. `CondaToSNonInteractiveError`
@@ -194,6 +234,10 @@ If runtime fails with missing file under `data/motions/...`, install data pack f
 5. CUDA not detected in sandboxed run but detected in real shell
 - Re-run in normal WSL shell with GPU access, not in restricted sandbox.
 
+6. SSH disconnected during long training
+- This is expected when the job is in tmux; reconnect and run `tmux attach -t <session>`.
+- If a session is stuck and unusable, run `tmux kill-session -t <session>` and restart training.
+
 ## Output checklist
 
 Record:
@@ -203,3 +247,4 @@ Record:
 - `torch` / `newton` / `warp-lang` versions
 - result of Newton smoke test
 - whether motion data pack is installed
+- tmux session name used for long-running training

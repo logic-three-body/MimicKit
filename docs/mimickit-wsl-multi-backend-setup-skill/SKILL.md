@@ -1,6 +1,6 @@
 ---
 name: mimickit-wsl-multi-backend-setup
-description: Configure MimicKit in WSL2 with three isolated backends (Newton, Isaac Lab, Isaac Gym), including conda env strategy, activation hooks, dependency install order, and smoke tests.
+description: Configure MimicKit in WSL2 with three isolated backends (Newton, Isaac Lab, Isaac Gym), including conda env strategy, activation hooks, dependency install order, smoke tests, and tmux keep-alive workflow for long-running training.
 ---
 
 # MimicKit WSL Multi-Backend Setup
@@ -41,6 +41,31 @@ conda activate mimickit-isaacgym && conda env export --no-builds > /root/Project
 ```
 
 Never install mixed backend dependencies into one env. If a backend breaks, rebuild only that env.
+
+## tmux Policy for Long Training
+
+Use tmux by default for any `--mode train` run and whenever SSH/network reliability is uncertain.
+
+Keep one training job per tmux session, and encode backend in the session name:
+- Newton: `mk-newton-<exp>`
+- Isaac Lab: `mk-ilab-<exp>`
+- Isaac Gym: `mk-igym-<exp>`
+
+Core tmux commands:
+
+```bash
+tmux new -s mk-newton-exp01
+tmux ls
+tmux attach -t mk-newton-exp01
+tmux kill-session -t mk-newton-exp01
+```
+
+Detach safely:
+- press `Ctrl+b`, release, then press `d`
+
+Use pane split to monitor GPU:
+- `Ctrl+b` then `%` or `"`
+- run `watch -n 1 nvidia-smi` or `nvtop` in the monitor pane
 
 ## Environment Layout
 
@@ -237,14 +262,49 @@ python "$MIMICKIT_DIR/mimickit/run.py" \
   --num_envs 1 --visualize false --mode test --test_episodes 1 --devices cuda:0
 ```
 
-## 5. Required Compatibility Patch
+## 5. Long-Run Training Sessions
+
+Use backend-specific env + engine config inside the matching tmux session.
+
+Newton example:
+```bash
+tmux new -s mk-newton-train01
+conda activate mimickit
+python "$MIMICKIT_DIR/mimickit/run.py" \
+  --arg_file "$MIMICKIT_DIR/args/deepmimic_humanoid_ppo_args.txt" \
+  --engine_config "$MIMICKIT_DIR/data/engines/newton_engine.yaml" \
+  --mode train --num_envs 1024 --visualize false --devices cuda:0
+```
+
+Isaac Lab example:
+```bash
+tmux new -s mk-ilab-train01
+conda activate mimickit-isaaclab
+python "$MIMICKIT_DIR/mimickit/run.py" \
+  --arg_file "$MIMICKIT_DIR/args/deepmimic_humanoid_ppo_args.txt" \
+  --engine_config "$MIMICKIT_DIR/data/engines/isaac_lab_engine.yaml" \
+  --mode train --num_envs 1024 --visualize false --devices cuda:0
+```
+
+Isaac Gym example:
+```bash
+tmux new -s mk-igym-train01
+conda activate mimickit-isaacgym
+TORCH_EXTENSIONS_DIR=/tmp/torch_extensions_isaacgym \
+python "$MIMICKIT_DIR/mimickit/run.py" \
+  --arg_file "$MIMICKIT_DIR/args/deepmimic_humanoid_ppo_args.txt" \
+  --engine_config "$MIMICKIT_DIR/data/engines/isaac_gym_engine.yaml" \
+  --mode train --num_envs 1024 --visualize false --devices cuda:0
+```
+
+## 6. Required Compatibility Patch
 
 For old/new torch compatibility in Isaac Gym env, keep this change in `mimickit/envs/deepmimic_env.py`:
 - replace `torch.linalg.vector_norm(..., dim=-1)` with `torch.norm(..., p=2, dim=-1)` in `compute_tracking_error`.
 
 This avoids runtime failures when `torch.linalg.vector_norm` is unavailable.
 
-## 6. Validation Checklist
+## 7. Validation Checklist
 
 Run:
 
@@ -260,7 +320,7 @@ Expected:
 - `torch.cuda.is_available()` is `True`
 - each backend smoke test reaches `Mean Return` output without crash
 
-## 7. Project Initial Test Ladder
+## 8. Project Initial Test Ladder
 
 Run these checks in order after a fresh setup:
 
@@ -306,3 +366,7 @@ python -c "import isaacgym.gymapi as gymapi; print('isaacgym ok')"
 
 4. Motion data missing:
 - extract MimicKit data pack into `data/` before smoke tests
+
+5. SSH disconnect during training:
+- this does not stop jobs running in tmux sessions
+- reconnect and resume with `tmux attach -t <session>`

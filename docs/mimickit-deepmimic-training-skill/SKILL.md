@@ -317,3 +317,114 @@ Cross-method dual-device smoke tests (same NCCL profile):
 - AMP humanoid: PASS (`args/amp_humanoid_args.txt`, `--mode test --num_envs 4 --test_episodes 1`)
 - ASE humanoid: PASS (`args/ase_humanoid_args.txt`, `--mode test --num_envs 4 --test_episodes 1`)
 - ADD humanoid: PASS (`args/add_humanoid_args.txt`, `--mode test --num_envs 4 --test_episodes 1`)
+
+## Dual-GPU Saturation Tuning (2026-02-11)
+
+### Key finding
+
+On this host, increasing `num_envs` alone scales throughput a lot, but does not fully saturate both GPUs.
+
+Observed from sweeps:
+- `num_envs=1024` per GPU: avg util about `37%/39%`, throughput about `29k samples/s`
+- `num_envs=4096` per GPU (default agent): avg util about `44%/44%`, throughput about `79k samples/s`
+
+To push utilization higher, the agent update workload must also increase.
+
+### High-util profile (recommended)
+
+Use:
+- `num_envs=4096` per GPU
+- `actor_net=fc_3layers_1024units`
+- `critic_net=fc_3layers_1024units`
+- `update_epochs=40`
+- `batch_size=2`
+
+Validated short-run result:
+- avg util about `69%/70%` (including startup)
+- steady-state (skip first ~30 samples) about `77%/79%`
+- instantaneous peaks around `93%/92%`
+- throughput about `23k samples/s`
+
+Tradeoff:
+- much higher GPU utilization
+- lower samples/s vs high-throughput baseline
+
+### Create high-util agent config (runtime file)
+
+```bash
+cat > /tmp/mk_agent_extreme_4096.yaml <<'EOF'
+agent_name: "PPO"
+
+model:
+  actor_net: "fc_3layers_1024units"
+  actor_init_output_scale: 0.01
+  actor_std_type: "FIXED"
+  action_std: 0.05
+  critic_net: "fc_3layers_1024units"
+
+optimizer:
+    type: "SGD"
+    learning_rate: 5e-5
+
+discount: 0.99
+steps_per_iter: 32
+iters_per_output: 100
+test_episodes: 32
+normalizer_samples: 100000000
+
+update_epochs: 40
+batch_size: 2
+td_lambda: 0.95
+ppo_clip_ratio: 0.2
+norm_adv_clip: 4.0
+action_bound_weight: 10.0
+action_entropy_weight: 0.0
+action_reg_weight: 0.0
+critic_loss_weight: 1.0
+EOF
+```
+
+### Launch high-util dual longrun
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+TS=$(date +%Y%m%d_%H%M%S)
+OUT_DIR="output/train/deepmimic_newton_longrun_${TS}_dual_hiutil_e4096"
+MASTER_PORT=$(shuf -i 20000-45000 -n 1)
+
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+export NCCL_CUMEM_ENABLE=0
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+python mimickit/run.py \
+  --arg_file args/deepmimic_humanoid_ppo_args.txt \
+  --engine_config data/engines/newton_engine.yaml \
+  --agent_config /tmp/mk_agent_extreme_4096.yaml \
+  --mode train \
+  --visualize false \
+  --devices cuda:0 cuda:1 \
+  --master_port "${MASTER_PORT}" \
+  --num_envs 4096 \
+  --out_dir "${OUT_DIR}"
+```
+
+Port note:
+- if you see `DistNetworkError ... EADDRINUSE`, restart with a new explicit `--master_port`.
+
+### Utilization-first sweep order
+
+When goal is "eat both GPUs" instead of max samples/s, tune in this order:
+1. keep NCCL profile fixed (`P2P_DISABLE`, `IB_DISABLE`, `CUMEM_ENABLE=0`)
+2. increase `num_envs` to `4096` per GPU
+3. then increase agent compute (`update_epochs`, network depth)
+4. if GPUs are imbalanced at `>4096`, prefer backing down to `4096` with heavier agent update
+
+### Artifact locations from this tuning
+
+- env sweep summary: `output/train/deepmimic_dual_sweep_20260211_221414/summary.tsv`
+- high env sweep summary: `output/train/deepmimic_dual_sweep_high_20260211_224408/summary.tsv`
+- compute sweep summary: `output/train/deepmimic_dual_compute_sweep_20260211_230136/summary.tsv`

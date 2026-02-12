@@ -349,6 +349,10 @@ Tradeoff:
 - much higher GPU utilization
 - lower samples/s vs high-throughput baseline
 
+Agentized files in repo:
+- throughput baseline: `data/agents/deepmimic_humanoid_ppo_agent_throughput.yaml`
+- high-util profile: `data/agents/deepmimic_humanoid_ppo_agent_hiutil.yaml`
+
 ### Create high-util agent config (runtime file)
 
 ```bash
@@ -382,6 +386,11 @@ action_entropy_weight: 0.0
 action_reg_weight: 0.0
 critic_loss_weight: 1.0
 EOF
+```
+
+Or directly use repo profile:
+```bash
+--agent_config data/agents/deepmimic_humanoid_ppo_agent_hiutil.yaml
 ```
 
 ### Launch high-util dual longrun

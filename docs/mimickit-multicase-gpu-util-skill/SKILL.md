@@ -33,6 +33,7 @@ Install dependency required by some Newton assets:
 
 ```bash
 /root/miniconda3/envs/mimickit/bin/pip install trimesh
+/root/miniconda3/envs/mimickit/bin/pip install scipy
 ```
 
 ## Benchmark Procedure
@@ -47,7 +48,9 @@ cd /root/Project/MimicKit
 2. Script behavior:
 - discovers trainable cases (`mode=train` and `agent_config` exists)
 - creates per-case hiutil agent variant (`update_epochs>=20`, `batch_size<=2`, optional 3-layer net upgrade)
-- tries env ladder: `1024 -> 512 -> 256` (per GPU)
+- tries env ladder:
+  - default cases: `1024 -> 512 -> 256` (per GPU)
+  - `pi_plus` cases: `1024 -> 768 -> 512 -> 384 -> 256 -> 192 -> 128 -> 96 -> 64 -> 48 -> 44 -> 40 -> 39 -> 38 -> 36 -> 32`
 - falls back to default agent ladder if hiutil fails
 - writes `best_by_case.tsv`
 
@@ -55,6 +58,20 @@ cd /root/Project/MimicKit
 - `output/train/case_gpu_bench_<timestamp>/case_manifest.tsv`
 - `output/train/case_gpu_bench_<timestamp>/best_by_case.tsv`
 - per-run logs under `output/train/case_gpu_bench_<timestamp>/runs/...`
+
+4. Useful script options:
+
+```bash
+python scripts/run_case_gpu_bench.py --help
+```
+
+Key options:
+- `--cases`: run only selected cases (comma-separated)
+- `--env-ladder`: default case ladder
+- `--pi-plus-ladder`: dedicated ladder for `pi_plus`
+- `--max-seconds`: timeout per probe
+- `--iter-target`: bounded probe iterations
+- `--root-out`: deterministic output folder
 
 ## Classification Summary
 
@@ -93,9 +110,27 @@ When reporting results, include:
 - per-method success and average utilization
 - failure pattern categories (dependency, OOM, NCCL, timeout, asset mismatch)
 
-## Current Observations (2026-02-12, in-progress)
+## Pi-plus Recovery Workflow (validated)
 
-- `add` family on Newton dual:
-  - `add_g1`, `add_go2`, `add_humanoid`, `add_smpl`: hiutil `e1024` runs succeeded
-  - `add_pi_plus`: hiutil and default ladders (`1024/512/256`) all ended with `oom_or_nccl`
-- Keep this section updated from `docs/README_MimicKit_GPUCaseBenchmark.md`.
+When baseline benchmark marks `*_pi_plus*` as `oom_or_nccl`, run a focused subset:
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+python -u scripts/run_case_gpu_bench.py \
+  --cases add_pi_plus_args.txt,amp_pi_plus_args.txt,deepmimic_pi_plus_ppo_args.txt \
+  --env-ladder 44,40,39,38,36,32 \
+  --pi-plus-ladder 44,40,39,38,36,32 \
+  --max-seconds 420 \
+  --iter-target 8 \
+  --root-out case_gpu_bench_piplus_final_<timestamp>
+```
+
+Validated result on this host (`2026-02-12`):
+- `add_pi_plus_args.txt`: dual ok at `num_envs=40` (hiutil)
+- `amp_pi_plus_args.txt`: dual ok at `num_envs=38` (hiutil)
+- `deepmimic_pi_plus_ppo_args.txt`: dual ok at `num_envs=40` (hiutil)
+
+Use `e38` as the universal safe fallback for all `pi_plus` methods when one common value is required.

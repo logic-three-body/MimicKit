@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import argparse
 import csv
 import glob
+import importlib
 import json
 import os
 import random
@@ -22,6 +24,7 @@ TRAIN_PY = Path(os.environ.get('MIMICKIT_TRAIN_PY', sys.executable))
 ENGINE_NEWTON = os.environ.get('MIMICKIT_ENGINE_CONFIG', 'data/engines/newton_engine.yaml')
 DEVICES = 'cuda:0 cuda:1'
 ENV_LADDER = [1024, 512, 256]
+PI_PLUS_ENV_LADDER = [1024, 768, 512, 384, 256, 192, 128, 96, 64, 48, 44, 40, 39, 38, 36, 32]
 MAX_SECONDS = 420
 ITER_TARGET = 8
 
@@ -56,6 +59,52 @@ def parse_arg_file(path: Path):
         else:
             i += 1
     return out
+
+
+def parse_int_ladder(text: str):
+    vals = []
+    for token in text.split(','):
+        t = token.strip()
+        if not t:
+            continue
+        vals.append(int(t))
+    out = []
+    seen = set()
+    for v in vals:
+        if v <= 0:
+            continue
+        if v in seen:
+            continue
+        out.append(v)
+        seen.add(v)
+    return out
+
+
+def parse_csv_names(text: str):
+    vals = []
+    for token in text.split(','):
+        t = token.strip()
+        if not t:
+            continue
+        vals.append(t)
+    return vals
+
+
+def normalize_case_name(name: str):
+    base = os.path.basename(name)
+    if not base.endswith('.txt'):
+        base = f'{base}.txt'
+    return base
+
+
+def check_python_deps(modules):
+    missing = []
+    for m in modules:
+        try:
+            importlib.import_module(m)
+        except Exception as e:
+            missing.append((m, str(e)))
+    return missing
 
 
 def build_hiutil_agent(src_rel: str, dst: Path):
@@ -281,8 +330,45 @@ def run_one(case_name, arg_rel, agent_rel, variant, num_envs, out_dir):
 
 
 def main():
+    global MAX_SECONDS, ITER_TARGET, ENGINE_NEWTON
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--cases', default='', help='comma-separated case names (e.g. amp_humanoid_args.txt,deepmimic_pi_plus_ppo_args.txt)')
+    ap.add_argument('--env-ladder', default=','.join(str(x) for x in ENV_LADDER), help='default per-GPU env ladder')
+    ap.add_argument('--pi-plus-ladder', default=','.join(str(x) for x in PI_PLUS_ENV_LADDER), help='per-GPU env ladder for pi_plus cases')
+    ap.add_argument('--max-seconds', type=int, default=MAX_SECONDS, help='max runtime per probe')
+    ap.add_argument('--iter-target', type=int, default=ITER_TARGET, help='target iterations for bounded probe')
+    ap.add_argument('--engine-config', default=ENGINE_NEWTON, help='engine config path')
+    ap.add_argument('--root-out', default='', help='custom output root under output/train')
+    ap.add_argument('--require-deps', default='trimesh,scipy', help='comma-separated Python modules required before run; empty disables check')
+    args = ap.parse_args()
+
+    MAX_SECONDS = int(args.max_seconds)
+    ITER_TARGET = int(args.iter_target)
+    ENGINE_NEWTON = args.engine_config
+
+    case_filter = {normalize_case_name(x) for x in parse_csv_names(args.cases)} if args.cases.strip() else set()
+    default_ladder = parse_int_ladder(args.env_ladder)
+    pi_plus_ladder = parse_int_ladder(args.pi_plus_ladder)
+    if not default_ladder:
+        default_ladder = list(ENV_LADDER)
+    if not pi_plus_ladder:
+        pi_plus_ladder = list(PI_PLUS_ENV_LADDER)
+
+    required_deps = parse_csv_names(args.require_deps)
+    if required_deps:
+        missing = check_python_deps(required_deps)
+        if missing:
+            print('[ERROR] Missing Python dependencies required for this benchmark:', file=sys.stderr)
+            for mod, err in missing:
+                print(f'  - {mod}: {err}', file=sys.stderr)
+            sys.exit(2)
+
     ts = time.strftime('%Y%m%d_%H%M%S')
-    root_out = ROOT / 'output' / 'train' / f'case_gpu_bench_{ts}'
+    if args.root_out:
+        root_out = ROOT / 'output' / 'train' / args.root_out
+    else:
+        root_out = ROOT / 'output' / 'train' / f'case_gpu_bench_{ts}'
     root_out.mkdir(parents=True, exist_ok=True)
 
     manifest_rows = []
@@ -306,6 +392,8 @@ def main():
         }
         manifest_rows.append(row)
         if mode == 'train' and agent:
+            if case_filter and name not in case_filter:
+                continue
             train_cases.append(row)
 
     manifest_tsv = root_out / 'case_manifest.tsv'
@@ -317,13 +405,19 @@ def main():
     results = []
     print(f"[INFO] total_cases={len(manifest_rows)} trainable_cases={len(train_cases)}", flush=True)
     print(f"[INFO] root_out={root_out}", flush=True)
+    print(f"[INFO] default_env_ladder={default_ladder} pi_plus_env_ladder={pi_plus_ladder}", flush=True)
+    print(f"[INFO] max_seconds={MAX_SECONDS} iter_target={ITER_TARGET} engine_config={ENGINE_NEWTON}", flush=True)
+    if case_filter:
+        print(f"[INFO] case_filter={sorted(case_filter)}", flush=True)
 
     for idx, case in enumerate(train_cases, 1):
         case_name = case['case']
         arg_rel = f"args/{case_name}"
         base_agent = case['agent_config']
+        case_ladder = pi_plus_ladder if 'pi_plus' in case_name else default_ladder
 
         print(f"\\n[CASE {idx}/{len(train_cases)}] {case_name}", flush=True)
+        print(f"  [LADDER] {case_ladder}", flush=True)
 
         hi_agent_path = root_out / 'agent_variants' / case_name.replace('.txt', '_hiutil.yaml')
         try:
@@ -336,7 +430,7 @@ def main():
         case_runs = []
         selected = None
 
-        for num_envs in ENV_LADDER:
+        for num_envs in case_ladder:
             out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'hiutil_e{num_envs}'
             res = run_one(case_name, arg_rel, hi_rel, 'hiutil', num_envs, out_dir)
             case_runs.append(res)
@@ -346,7 +440,7 @@ def main():
                 break
 
         if selected is None:
-            for num_envs in ENV_LADDER:
+            for num_envs in case_ladder:
                 out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'default_e{num_envs}'
                 res = run_one(case_name, arg_rel, base_agent, 'default', num_envs, out_dir)
                 case_runs.append(res)

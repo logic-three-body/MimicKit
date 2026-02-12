@@ -39,6 +39,11 @@ def main():
         r = csv.DictReader(f, delimiter='\t')
         rows = list(r)
 
+    for row in rows:
+        if not row.get('method'):
+            case_name = row.get('case', '')
+            row['method'] = case_name.split('_')[0] if case_name else 'unknown'
+
     by_method = defaultdict(list)
     for row in rows:
         by_method[row['method']].append(row)

@@ -60,6 +60,9 @@ Notes:
   - `MESA_GL_VERSION_OVERRIDE=3.3`
   - `MESA_GLSL_VERSION_OVERRIDE=330`
 - for `pi_plus` cases, script uses dedicated env ladder and hiutil agent variant when available.
+- script uses case-specific default for `amp_pi_plus`:
+  - `--amp-pi-plus-ladder 38,36,32,24,16,8,4,2,1`
+  - avoids known `hiutil e40/e39` OOM on this host
 
 ## What the Script Does
 
@@ -137,7 +140,7 @@ Observed stable pi-plus behavior on this host:
 - `add_pi_plus`: `hiutil e40` pass
 - `deepmimic_pi_plus`: `hiutil e40` pass
 - `amp_pi_plus`: `hiutil e40/e39` OOM, `hiutil e38` pass
-- practical fallback default for `amp_pi_plus`: `--pi-plus-ladder 38,36,32,24,...`
+- practical fallback default for `amp_pi_plus`: `--amp-pi-plus-ladder 38,36,32,24,...`
 
 Important runtime fix included in repo:
 - `mimickit/learning/base_agent.py`

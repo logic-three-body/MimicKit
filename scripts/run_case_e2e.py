@@ -33,6 +33,7 @@ HIUTIL_AGENT_BY_CASE = {
     'amp_pi_plus_args.txt': 'data/agents/amp_pi_plus_agent_hiutil.yaml',
     'deepmimic_pi_plus_ppo_args.txt': 'data/agents/deepmimic_pi_plus_ppo_agent_hiutil.yaml',
 }
+AMP_PI_PLUS_CASE = 'amp_pi_plus_args.txt'
 
 
 def parse_arg_file(path: Path):
@@ -177,6 +178,7 @@ def main():
     ap.add_argument('--devices-nontrainable', default='cuda:0')
     ap.add_argument('--default-ladder', default='512,256,128,64,32')
     ap.add_argument('--pi-plus-ladder', default='40,39,38,36,32,24,16,8,4,2,1')
+    ap.add_argument('--amp-pi-plus-ladder', default='38,36,32,24,16,8,4,2,1')
     ap.add_argument('--train-iters', type=int, default=4)
     ap.add_argument('--include-nontrainable', action='store_true')
     ap.add_argument('--nontrainable-num-envs', type=int, default=1)
@@ -193,10 +195,13 @@ def main():
     case_filter = {normalize_case_name(x) for x in parse_csv(args.cases)} if args.cases.strip() else set()
     default_ladder = parse_int_csv(args.default_ladder)
     pi_plus_ladder = parse_int_csv(args.pi_plus_ladder)
+    amp_pi_plus_ladder = parse_int_csv(args.amp_pi_plus_ladder)
     if not default_ladder:
         default_ladder = [512, 256, 128, 64, 32]
     if not pi_plus_ladder:
         pi_plus_ladder = [40, 39, 38, 36, 32, 24, 16, 8, 4, 2, 1]
+    if not amp_pi_plus_ladder:
+        amp_pi_plus_ladder = [38, 36, 32, 24, 16, 8, 4, 2, 1]
 
     req_mods = parse_csv(args.require_deps)
     missing = check_python_deps(req_mods)
@@ -266,7 +271,11 @@ def main():
         f'selected={len(selected)} include_nontrainable={int(args.include_nontrainable)}',
         flush=True,
     )
-    print(f'[INFO] default_ladder={default_ladder} pi_plus_ladder={pi_plus_ladder}', flush=True)
+    print(
+        f'[INFO] default_ladder={default_ladder} '
+        f'pi_plus_ladder={pi_plus_ladder} amp_pi_plus_ladder={amp_pi_plus_ladder}',
+        flush=True,
+    )
     print(f'[INFO] train_devices={train_devices}', flush=True)
     print(f'[INFO] nontrainable_devices={nontrain_devices}', flush=True)
 
@@ -279,7 +288,12 @@ def main():
         base_agent = case['agent_config']
 
         if is_trainable:
-            ladder = pi_plus_ladder if 'pi_plus' in case_name else default_ladder
+            if case_name == AMP_PI_PLUS_CASE:
+                ladder = amp_pi_plus_ladder
+            elif 'pi_plus' in case_name:
+                ladder = pi_plus_ladder
+            else:
+                ladder = default_ladder
             variants = pick_agent_variants(case_name, base_agent)
             case_devices = train_devices
         else:

@@ -195,7 +195,9 @@ class BaseAgent(torch.nn.Module):
         return
     
     def _sync_optimizer(self):
-        self._optimizer.sync()
+        # Dummy agent has no optimizer; skip sync in that case.
+        if hasattr(self, "_optimizer") and self._optimizer is not None:
+            self._optimizer.sync()
         return
 
     def _build_exp_buffer(self, config):

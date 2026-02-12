@@ -1,6 +1,6 @@
 ---
 name: mimickit-deepmimic-training
-description: Run and stabilize MimicKit DeepMimic humanoid PPO training on Newton backend with tmux keep-alive, warmup-to-longrun promotion, and fallback for NCCL/CUDA OOM or scale failures. Use when a user asks to start, resume, monitor, or debug DeepMimic training runs and needs concrete commands for devices, num_envs, out_dir, and recovery.
+description: Run and stabilize MimicKit DeepMimic humanoid PPO on Newton backend across the full path from training to inference to visualization, with tmux keep-alive and fallback for NCCL/CUDA OOM or visualization stack failures. Use when a user asks to start, evaluate, visualize, resume, or debug DeepMimic runs.
 ---
 
 # MimicKit DeepMimic Training (Newton + tmux)
@@ -9,9 +9,84 @@ description: Run and stabilize MimicKit DeepMimic humanoid PPO training on Newto
 
 Apply a reproducible workflow to:
 - launch DeepMimic humanoid PPO training quickly
+- validate trained model with explicit inference output
+- validate visual playback for one episode
 - keep long training alive in tmux across SSH disconnects
 - promote from bounded warmup to longrun safely
 - handle multi-device startup failures with deterministic fallback
+
+## Fast E2E Path (Train -> Inference -> Visualization)
+
+Use this when the user wants one complete runnable case quickly.
+
+### Stage 1: short training (produce model)
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+TS=$(date +%Y%m%d_%H%M%S)
+OUT_DIR="output/train/deepmimic_humanoid_e2e_${TS}"
+
+python mimickit/run.py \
+  --arg_file args/deepmimic_humanoid_ppo_args.txt \
+  --engine_config data/engines/newton_engine.yaml \
+  --mode train \
+  --visualize false \
+  --devices cuda:0 \
+  --num_envs 512 \
+  --max_samples 131072 \
+  --out_dir "${OUT_DIR}"
+```
+
+Pass conditions:
+- exit code `0`
+- `${OUT_DIR}/model.pt` exists
+- `${OUT_DIR}/log.txt` exists
+
+### Stage 2: inference check (headless test)
+
+```bash
+python mimickit/run.py \
+  --arg_file args/deepmimic_humanoid_ppo_args.txt \
+  --engine_config data/engines/newton_engine.yaml \
+  --mode test \
+  --visualize false \
+  --devices cuda:0 \
+  --num_envs 1 \
+  --test_episodes 10 \
+  --model_file "${OUT_DIR}/model.pt"
+```
+
+Pass condition:
+- log prints `Mean Return` and `Episodes`
+
+### Stage 3: visual playback check (1 episode)
+
+On some WSL/Xwayland setups, shader compilation fails (`GLSL 1.50 is not supported`) unless GL/GLSL versions are overridden.
+
+```bash
+MESA_GL_VERSION_OVERRIDE=3.3 \
+MESA_GLSL_VERSION_OVERRIDE=330 \
+timeout --signal=TERM --kill-after=10 180 \
+python mimickit/run.py \
+  --arg_file args/deepmimic_humanoid_ppo_args.txt \
+  --engine_config data/engines/newton_engine.yaml \
+  --mode test \
+  --visualize true \
+  --devices cuda:0 \
+  --num_envs 1 \
+  --test_episodes 1 \
+  --model_file "${OUT_DIR}/model.pt"
+```
+
+Pass condition:
+- exit code `0` and log prints `Mean Return`
+
+Notes:
+- `Warp CUDA error 304` warnings may appear in visualization mode when CUDA/GL interop is unavailable; this is acceptable if playback and metrics complete.
+- keep `test/visualize` single-GPU for reliability.
 
 ## Standard Workflow
 
@@ -302,8 +377,21 @@ When completing a DeepMimic training task, report:
 - selected devices and `num_envs`
 - warmup output path and whether `model.pt`/`log.txt` exist
 - longrun output path and whether training process is alive
+- inference command and the printed `Mean Return`
+- visualization command, exit code, and whether `Mean Return` is printed
 - if fallback used, which step solved the issue
 - whether NCCL profile env vars were applied
+
+## Latest Verified Run (2026-02-12, E2E)
+
+Train -> inference -> visualization verified for:
+- case: `args/deepmimic_humanoid_ppo_args.txt`
+- train output: `output/train/deepmimic_humanoid_e2e_20260212_131701`
+- train status: pass (`model.pt` and `log.txt` generated)
+- inference status: pass (`Mean Return: 4.6156`, `Episodes: 10`)
+- visualization status: pass with Mesa override
+  - required env: `MESA_GL_VERSION_OVERRIDE=3.3`, `MESA_GLSL_VERSION_OVERRIDE=330`
+  - result: `Mean Return: 4.1834`, `Episodes: 1`
 
 ## Latest Verified Run (2026-02-11)
 

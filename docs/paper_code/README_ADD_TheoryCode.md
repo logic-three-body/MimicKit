@@ -1,94 +1,83 @@
-﻿# ADD：理论-代码精细对照
+# ADD：论文-代码精细对照（更新版）
 
-## 1. 论文主问题与目标
-参考论文：ADD (SIGGRAPH Asia 2025)  
-- 论文预印本：https://arxiv.org/abs/2505.04961
+## 1. 论文核心问题与目标
+参考论文：ADD (SIGGRAPH Asia 2025)
+- arXiv: https://arxiv.org/abs/2505.04961
 
-ADD 把多目标优化从“手工加权和”改成“对抗差分聚合”。
+ADD针对多目标优化里“手工加权难调”的问题，提出对抗差分判别：
+- 传统：\(\min_\theta \sum_i w_i l_i(\theta)\)
+- ADD：先构造差分向量 \(\Delta\)，再做对抗优化
 
-传统形式：
+论文核心形式（简化写法）：
 \[
-\min_\theta \sum_i w_i l_i(\theta)
+\min_\theta \max_D\; \log D(\mathbf{0}) + \mathbb{E}[\log(1-D(\Delta))] - \lambda^{GP}\mathcal{L}^{GP}(D)
 \]
-ADD 形式：把各目标误差拼成差分向量
+其中唯一正样本是 \(\Delta=\mathbf{0}\)，负样本是当前策略产生的差分向量。
+
+在运动模仿场景，论文写作：
 \[
-\Delta = [l_1(\theta),...,l_n(\theta)]
+\Delta_t = \phi(\hat{s}_t) \ominus \phi(s_t),\quad
+r_t = -\log(1-D(\Delta_t))
 \]
-再做 adversarial min-max：
-\[
-\min_\theta \max_D \; \log D(0) + \log(1-D(\Delta)) - \lambda_{GP}L_{GP}
-\]
-其中正样本只有一个：\(\Delta=0\)（理想零误差）。
 
-## 2. 从论文到 MimicKit 的实现对照
+## 2. 从论文到 MimicKit 的实现映射
 
-### 2.1 差分向量构造（核心）
-论文 motion imitation 里定义：\(\Delta_t = \phi(\hat s_t) \ominus \phi(s_t)\)。
+### 2.1 差分向量构造
+- policy观测：`mimickit/envs/add_env.py:33` (`_update_disc_obs`)
+- demo观测：`mimickit/envs/add_env.py:67` (`_update_disc_obs_demo`)
+- 差分构造：`mimickit/learning/add_agent.py:50` (`_compute_rewards` 中 `obs_diff = disc_obs_demo - disc_obs`)
 
-MimicKit 对应：
-- policy 分支观测：`mimickit/envs/add_env.py:33` `_update_disc_obs`
-- demo 分支观测：`mimickit/envs/add_env.py:67` `_update_disc_obs_demo`
-- 差分计算：`mimickit/learning/add_agent.py:55` `obs_diff = disc_obs_demo - disc_obs`
+### 2.2 “单一正样本=零向量”判别器
+- 零向量模板：`mimickit/learning/add_agent.py:21` (`_build_pos_diff`)
+- 判别器主损失：`mimickit/learning/add_agent.py:74` (`_compute_disc_loss`)
 
-### 2.2 “单一正样本”判别器训练
-论文强调正样本仅用零向量。MimicKit 完整实现：
-- 零向量模板：`_build_pos_diff` (`mimickit/learning/add_agent.py:21`)
-- 正样本 logit：`disc_pos_logit = eval_disc(pos_diff)`
-- 负样本 logit：来自 `diff_obs = tar_disc_obs - disc_obs`
-- 组合损失：`_compute_disc_loss` (`mimickit/learning/add_agent.py:74`)
+实现上：
+- 正样本：`pos_diff = 0`
+- 负样本：`diff_obs = tar_disc_obs - disc_obs`（含replay混合）
 
-### 2.3 梯度惩罚（对负样本）
-论文在 ADD 中强调 GP 对稳定性关键，且重点作用于负样本差分。MimicKit 对应：
-- `mimickit/learning/add_agent.py:107` 开始对 `norm_diff_obs` 求梯度
-- `disc_loss += disc_grad_penalty * ...`
+### 2.3 梯度惩罚（GP）
+- 代码在负样本差分上对判别器输出求梯度惩罚（`norm_diff_obs` 分支），与论文“负样本GP重要”结论一致。
+- 入口同样在：`mimickit/learning/add_agent.py:74`（函数内部GP段）。
 
 ### 2.4 差分归一化（DiffNormalizer）
-ADD 的关键工程难点是各目标量纲差异。MimicKit 专门引入：
-- `mimickit/learning/diff_normalizer.py`
-- `record` 统计绝对值均值
-- `normalize` 用 `x / mean_abs` 做缩放并裁剪
+- 构建：`mimickit/learning/add_agent.py:27` (`_build_normalizers`)
+- 模块：`mimickit/learning/diff_normalizer.py`
 
-agent 中启用位置：
-- `mimickit/learning/add_agent.py:27` `_build_normalizers`
+它解决不同差分分量量纲差异问题，是ADD稳定训练的关键工程点之一。
 
-### 2.5 策略奖励
-论文中策略奖励为 \(-\log(1-D(\Delta_t))\)。MimicKit 对应：
-- `mimickit/learning/add_agent.py:50` `_compute_rewards`
-- `mimickit/learning/add_agent.py:59` `_calc_disc_rewards`
+### 2.5 策略奖励路径
+- ADD重写奖励融合：`mimickit/learning/add_agent.py:50` (`_compute_rewards`)
+- 判别器奖励函数沿用AMP基类实现：`mimickit/learning/amp_agent.py:209` (`_calc_disc_rewards`)
 
-实现上与 AMP 的 logit->prob 转换保持一致，再乘 `disc_reward_scale`。
+说明：
+- 旧文档里将 `_calc_disc_rewards` 写在 `add_agent.py`，实际当前仓库是在AMP基类里。
 
-## 3. 特征映射 \(\phi(\cdot)\) 与代码
-论文中的 \(\phi\) 是“用于比较参考/当前状态的特征提取”。MimicKit 对应：
-- `mimickit/envs/add_env.py:101` `compute_pos_obs`
-- `mimickit/envs/add_env.py:137` `compute_disc_vel_obs`
-- `mimickit/envs/add_env.py:154` `compute_disc_obs`
-
-包含 root/global pose、joint rotation、body position、vel 等，最后 flatten 成判别器输入。
-
-## 4. 论文项 -> 配置映射
+## 3. 论文项 -> 配置映射
 
 | 论文项 | 含义 | MimicKit 参数 |
 |---|---|---|
-| \(\lambda_{GP}\) | GP 强度 | `disc_grad_penalty` |
-| 判别器正则 | 控制过拟合/陡峭边界 | `disc_logit_reg`, `disc_weight_decay` |
-| 对抗损失权重 | 判别器在总 loss 中权重 | `disc_loss_weight` |
-| 差分奖励缩放 | policy 训练信号强度 | `disc_reward_scale` |
-| 任务/风格融合 | 是否混入外部 task reward | `task_reward_weight`, `disc_reward_weight` |
-| replay 样本 | 稳定判别器训练 | `disc_buffer_size`, `disc_replay_samples`, `disc_batch_size` |
+| \(\lambda^{GP}\) | 梯度惩罚强度 | `disc_grad_penalty` |
+| 判别器正则 | 稳定边界/防过拟合 | `disc_logit_reg`, `disc_weight_decay` |
+| 判别器loss权重 | 对抗分支权重 | `disc_loss_weight` |
+| 差分奖励强度 | 对策略的信号强度 | `disc_reward_scale` |
+| 任务/风格融合 | 是否叠加外部任务奖励 | `task_reward_weight`, `disc_reward_weight` |
+| replay稳态化 | 历史负样本注入 | `disc_buffer_size`, `disc_replay_samples`, `disc_batch_size` |
 
-主要配置：`data/agents/add_humanoid_agent.yaml`。
+主要配置文件：`data/agents/add_humanoid_agent.yaml`（其他机器人同结构）。
 
-## 5. ADD 与 AMP 的关键区别（代码视角）
-- AMP 判别器输入：`disc_obs` 与 `demo_obs` 分别分类。  
-- ADD 判别器输入：`demo_obs - disc_obs` 的差分向量，仅以零向量作为正样本。  
+## 4. 与论文一致点与实现差异
 
-对应代码差异：
-- AMP：`mimickit/learning/amp_agent.py:130`  
-- ADD：`mimickit/learning/add_agent.py:74`
+一致点：
+- 以差分向量 \(\Delta\) 为判别对象。
+- 正样本只用零向量。
+- 策略奖励由 \(-\log(1-D(\Delta))\) 思路驱动。
 
-## 6. 训练链路（实现顺序）
-1. env 同时输出 policy 与 demo 判别观测。  
-2. agent 构造差分向量并更新差分归一化器。  
-3. discriminator 以 `0`（正）和 `diff`（负）训练，含 GP。  
-4. 用判别器输出生成 reward，回传给 PPO 主干。  
+实现差异（工程化）：
+- 训练时加入replay与归一化器实现稳定化。
+- 判别器损失以工程可训练实现组织（logits + 正则 + GP），而非只保留最小数学形式。
+
+## 5. 读代码时的核对清单
+- `obs_diff` 是否确实来自 demo-policy 差分。
+- `disc_grad_penalty` 是否在负样本分支起作用。
+- DiffNormalizer是否更新正常（否则训练容易抖动）。
+- 奖励路径是否经过 ADD 的 `_compute_rewards` + AMP基类 `_calc_disc_rewards`。

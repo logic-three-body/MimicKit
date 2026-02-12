@@ -17,6 +17,14 @@ python mimickit/run.py --mode test --num_envs 4 --engine_config data/engines/isa
 ```
 The motion data used to train the controller can be specified through `motion_file` in [`data/envs/deepmimic_humanoid_env.yaml`](../data/envs/deepmimic_humanoid_env.yaml). The default configuration trains a controller to imitate a single motion clip. To train a more general controller that can imitate different motion clips, `motion_file` can be used to specify a dataset file, located in [`data/datasets/`](../data/datasets/), which will train a controller to imitate multiple motion clips.
 
+## Paper-to-Code Notes
+- Paper objective: `r_t = w^I r_t^I + w^G r_t^G`, with phase synchronization, RSI, and ET.
+- Core implementation entry points:
+  - reward: `mimickit/envs/deepmimic_env.py:788`
+  - observation: `mimickit/envs/deepmimic_env.py:330`, `mimickit/envs/deepmimic_env.py:681`
+  - reset/termination: `mimickit/envs/deepmimic_env.py:174`, `mimickit/envs/deepmimic_env.py:725`
+- Detailed formula-level mapping: [`docs/paper_code/README_DeepMimic_TheoryCode.md`](paper_code/README_DeepMimic_TheoryCode.md)
+
 ## Citation
 ```
 @article{

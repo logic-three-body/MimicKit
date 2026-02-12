@@ -1,73 +1,84 @@
-﻿# AMP：理论-代码精细对照
+# AMP：论文-代码精细对照（更新版）
 
-## 1. 论文主问题与目标
-参考论文：AMP (TOG 2021)  
-- 论文链接：https://arxiv.org/abs/2104.02180
+## 1. 论文核心问题与目标
+参考论文：AMP (TOG 2021)
+- arXiv: https://arxiv.org/abs/2104.02180
 
-AMP 的核心是把“风格”从手工 reward 中剥离出来，用判别器学习 style prior：
+AMP将任务目标与风格目标解耦：
 \[
 r_t = w_G r_t^G + w_S r_t^S
 \]
-- \(r_t^G\)：任务目标（what）
-- \(r_t^S\)：风格目标（how），由 adversarial discriminator 给出
+其中：
+- \(r_t^G\)：任务奖励（what to do）
+- \(r_t^S\)：风格奖励（how to do），来自adversarial motion prior
+
+论文关键思想：不再强依赖逐帧跟踪某个参考动作，而是让判别器学习“该动作分布是否像数据集中的风格”。
 
 ## 2. 论文关键公式与 MimicKit 对照
 
-### 2.1 判别器与风格奖励
-论文采用 state-transition 判别器（而非必须 state-action），并给策略风格奖励。MimicKit 对应：
-- 判别器网络：`mimickit/learning/amp_model.py:12` `eval_disc`
-- 判别器训练：`mimickit/learning/amp_agent.py:130` `_compute_disc_loss`
-- 风格奖励计算：`mimickit/learning/amp_agent.py:209` `_calc_disc_rewards`
-- 总奖励融合：`mimickit/learning/amp_agent.py:101` `_compute_rewards`
+### 2.1 判别器训练目标（论文）
+论文采用 state-transition 判别器，并给出 least-squares GAN 风格目标（含梯度正则）。
+风格奖励形式可写为（论文形式之一）：
+\[
+r^S(s_t,s_{t+1}) = \max\left(0, 1 - 0.25\,(D-1)^2\right)
+\]
 
-实现说明：
-- 论文正文给出 LSGAN 版本与 GP。
-- MimicKit 采用 BCE-logits + reward shaping（`-log(1-sigmoid(logit))`）实现同类 adversarial reward 信号。
+### 2.2 仓库实现路径
+- 判别器网络：`mimickit/learning/amp_model.py:12` (`eval_disc`)
+- 判别器损失：`mimickit/learning/amp_agent.py:130` (`_compute_disc_loss`)
+- 风格奖励：`mimickit/learning/amp_agent.py:209` (`_calc_disc_rewards`)
+- 奖励融合：`mimickit/learning/amp_agent.py:101` (`_compute_rewards`)
 
-### 2.2 判别器输入特征 \(\Phi(s_t,s_{t+1})\)
-论文强调判别器观测需要包含速度/姿态等运动学关键信息。MimicKit 对应：
-- 轨迹片段缓存：`mimickit/envs/amp_env.py:94` `_build_disc_obs_buffers`
-- 在线更新片段：`mimickit/envs/amp_env.py:194` `_update_disc_obs`
-- demo 片段生成：`mimickit/envs/amp_env.py:63` `_fetch_disc_demo_data`
-- feature 组装：`mimickit/envs/amp_env.py:328` `compute_disc_obs`
+实现细节（非常关键）：
+- 当前代码里判别器损失是 `BCEWithLogitsLoss`（正样本=demo，负样本=policy+replay），而不是直接按论文LSGAN公式逐字实现。
+- 风格奖励采用 logit 概率变换：
+  \[
+  r^S = -\log(1-\sigma(\text{logit}))\times \texttt{disc_reward_scale}
+  \]
+- 因此：该实现与论文思想一致，但损失形式属于工程上的等价替代与稳定化实现。
 
-`num_disc_obs_steps` 直接对应论文的“时序状态转移窗口”。
+### 2.3 判别器输入 \(\Phi(s_t,s_{t+1})\)
+- demo片段采样：`mimickit/envs/amp_env.py:63` (`_fetch_disc_demo_data`)
+- 轨迹buffer：`mimickit/envs/amp_env.py:94` (`_build_disc_obs_buffers`)
+- 在线更新：`mimickit/envs/amp_env.py:194` (`_update_disc_obs`)
+- 特征拼接：`mimickit/envs/amp_env.py:328` (`compute_disc_obs`)
 
-### 2.3 稳定训练：Replay + Normalizer + GP
-论文强调 adversarial 训练稳定性。MimicKit 的稳定化路径：
-- replay buffer：`_store_disc_replay_data` (`mimickit/learning/amp_agent.py:86`)
-- 判别器观测归一化：`_build_normalizers` (`mimickit/learning/amp_agent.py:44`)
-- gradient penalty：`_compute_disc_loss` 内 `disc_grad_penalty` (`mimickit/learning/amp_agent.py:155`)
+`num_disc_obs_steps` 对应论文里的时序窗口长度。
 
-### 2.4 AMP 与 DeepMimic 的目标差异
-- DeepMimic：对齐特定参考帧（强同步 tracking）。
-- AMP：匹配行为分布（style prior），不要求逐帧严格同步。
-
-这也是为什么 AMP 的 env 默认 `enable_tar_obs: False`，而 DeepMimic 常开 `enable_tar_obs`。
+### 2.4 训练稳定化（论文思想 -> 代码）
+- 判别器观测归一化：`mimickit/learning/amp_agent.py:44`
+- replay样本注入：`mimickit/learning/amp_agent.py:86`
+- gradient penalty：`mimickit/learning/amp_agent.py:130`（函数内GP项）
 
 ## 3. 公式/概念 -> 配置映射
 
-| 论文概念 | 含义 | MimicKit 配置 |
+| 论文概念 | 含义 | MimicKit 参数 |
 |---|---|---|
 | \(w_G\) | 任务奖励权重 | `task_reward_weight` |
 | \(w_S\) | 风格奖励权重 | `disc_reward_weight` |
-| 判别器 batch | 对抗训练规模 | `disc_batch_size` |
-| replay 采样 | 历史策略样本注入 | `disc_buffer_size`, `disc_replay_samples` |
-| GP 系数 | 判别器平滑约束 | `disc_grad_penalty` |
-| 判别器正则 | 防止过拟合/爆炸 | `disc_logit_reg`, `disc_weight_decay` |
-| style reward 缩放 | 风格信号强度 | `disc_reward_scale` |
-| 时序窗口 | 判别器观测长度 | `data/envs/amp_*.yaml` 的 `num_disc_obs_steps` |
+| 判别器batch | 对抗训练规模 | `disc_batch_size` |
+| replay注入 | 历史分布稳态化 | `disc_buffer_size`, `disc_replay_samples` |
+| GP强度 | 判别器平滑正则 | `disc_grad_penalty` |
+| 判别器正则 | 防过拟合/过陡边界 | `disc_logit_reg`, `disc_weight_decay` |
+| 风格奖励缩放 | 风格信号强度 | `disc_reward_scale` |
+| 时序窗口 | 判别器输入长度 | `num_disc_obs_steps`（env yaml） |
 
-主要文件：`data/agents/amp_humanoid_agent.yaml`, `data/agents/amp_task_humanoid_agent.yaml`。
+常用配置文件：
+- `data/agents/amp_humanoid_agent.yaml`（纯模仿）
+- `data/agents/amp_task_humanoid_agent.yaml`（任务+模仿）
 
-## 4. 训练链路（实现顺序）
-1. env 提供 `disc_obs`（策略轨迹）和 `fetch_disc_obs_demo`（参考轨迹）。
-2. agent 组装 batch：policy obs + demo obs + replay obs。
-3. 更新 discriminator（BCE + GP + regularization）。
-4. 用 disc logit 生成 style reward，与 task reward 加权。
-5. PPO 更新 actor/critic。
+## 4. 与论文一致点与实现差异
 
-## 5. 代码阅读重点
-- 判别器输入是否包含速度/旋转/末端信息（`compute_disc_obs`）。
-- `task_reward_weight` 与 `disc_reward_weight` 是否按实验目的设置。
-- GP 和 replay 是否打开（决定稳定性）。
+一致点：
+- style prior 来自判别器而非手工风格奖励。
+- 核心目标仍是 `task + style`。
+- 使用时序状态转移特征而非必须依赖同步相位。
+
+实现差异（需要明确）：
+- 论文展示了LSGAN表达；仓库判别器采用 BCE-logits 实现。
+- 奖励变换也采用工程化的 `-log(1-sigmoid(logit))`，不完全等式照搬论文样式。
+
+## 5. 读代码时的核对清单
+- `task_reward_weight` 与 `disc_reward_weight` 是否符合实验目标。
+- `disc_grad_penalty`、replay、normalizer 是否启用（稳定性关键）。
+- `num_disc_obs_steps` 与动作数据复杂度是否匹配。

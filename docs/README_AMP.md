@@ -25,6 +25,14 @@ python mimickit/run.py --mode test --num_envs 4 --engine_config data/engines/isa
 ```
 The weights used to balance the imitation and task rewards are specified by `disc_reward_weight` and `task_reward_weight` in the agent configuration file [`data/agents/amp_task_humanoid_agent.yaml`](../data/agents/amp_task_humanoid_agent.yaml). These parameters can be used to control how closely the model follows the motion data versus optimizing the task objective.
 
+## Paper-to-Code Notes
+- Paper objective: `r_t = w_G r_t^G + w_S r_t^S`, where style reward comes from adversarial motion prior.
+- Core implementation entry points:
+  - discriminator loss: `mimickit/learning/amp_agent.py:130`
+  - style reward: `mimickit/learning/amp_agent.py:209`
+  - transition features: `mimickit/envs/amp_env.py:328`
+- Detailed formula-level mapping: [`docs/paper_code/README_AMP_TheoryCode.md`](paper_code/README_AMP_TheoryCode.md)
+
 ## Citation
 ```
 @article{

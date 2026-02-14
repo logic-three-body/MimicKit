@@ -1,6 +1,6 @@
 # AMP
 
-![AMP](../images/AMP_teaser.png)
+![AMP](../../images/AMP_teaser.png)
 
 论文主页："AMP: Adversarial Motion Priors for Stylized Physics-Based Character Control"  
 https://xbpeng.github.io/projects/AMP/index.html

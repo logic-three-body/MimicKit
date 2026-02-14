@@ -1,6 +1,6 @@
 # DeepMimic（含 Vault 扩展示例）
 
-![DeepMimic](../images/DeepMimic_teaser.png)
+![DeepMimic](../../images/DeepMimic_teaser.png)
 
 论文主页："DeepMimic: Example-Guided Deep Reinforcement Learning of Physics-Based Character Skills"  
 https://xbpeng.github.io/projects/DeepMimic/index.html

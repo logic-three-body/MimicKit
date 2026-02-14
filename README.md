@@ -100,10 +100,13 @@ python mimickit/run.py --arg_file args/deepmimic_humanoid_ppo_args.txt --devices
 ## Methods
 
 More detailed instructions for each method are available here:
-- [DeepMimic](docs/README_DeepMimic.md)
-- [AMP](docs/README_AMP.md)
-- [ASE](docs/README_ASE.md)
-- [ADD](docs/README_ADD.md)
+- [DeepMimic](docs/methods/README_DeepMimic.md)
+- [AMP](docs/methods/README_AMP.md)
+- [ASE](docs/methods/README_ASE.md)
+- [ADD](docs/methods/README_ADD.md)
+
+Document index by category:
+- [Docs Index](docs/README.md)
 
 
 ## Visualizer UI

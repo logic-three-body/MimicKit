@@ -79,7 +79,7 @@ ASE继承AMP的对抗风格学习，并加入技能可辨识约束：
 对应文档：
 
 - `docs/paper_code/README_ASE_TheoryCode.md`
-- `docs/README_ASE.md`
+- `docs/methods/README_ASE.md`
 
 ## 7. 新手常见坑
 

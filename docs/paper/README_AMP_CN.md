@@ -89,7 +89,7 @@ AMP常用 `(s_t, s_{t+1})` 或多步窗口，而非单帧状态。原因是：
 具体对照文档：
 
 - `docs/paper_code/README_AMP_TheoryCode.md`
-- `docs/README_AMP.md`
+- `docs/methods/README_AMP.md`
 
 ## 7. 新手常见坑
 

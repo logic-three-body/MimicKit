@@ -15,7 +15,7 @@ Run all `args/*.txt` cases with one workflow and produce:
 This skill is for full-regression validation, not for longrun training.
 
 For long-cycle training across all cases, use:
-- `docs/mimickit-allcase-longcycle-skill/SKILL.md`
+- `docs/skill/mimickit-allcase-longcycle-skill/SKILL.md`
 - script: `scripts/run_case_longcycle.py`
 
 ## Scope

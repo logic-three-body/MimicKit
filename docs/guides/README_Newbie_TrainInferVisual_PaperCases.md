@@ -24,10 +24,10 @@
 
 1. 框架总览与安装：`README.md`
 2. 方法级基础说明：
-   - `docs/README_DeepMimic.md`
-   - `docs/README_AMP.md`
-   - `docs/README_ASE.md`
-   - `docs/README_ADD.md`
+   - `docs/methods/README_DeepMimic.md`
+   - `docs/methods/README_AMP.md`
+   - `docs/methods/README_ASE.md`
+   - `docs/methods/README_ADD.md`
 3. 论文-代码对照（公式到函数）：
    - `docs/paper_code/README_DeepMimic_TheoryCode.md`
    - `docs/paper_code/README_AMP_TheoryCode.md`

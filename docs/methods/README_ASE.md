@@ -1,6 +1,6 @@
 # ASE
 
-![ASE](../images/ASE_teaser.png)
+![ASE](../../images/ASE_teaser.png)
 
 论文主页："ASE: Large-Scale Reusable Adversarial Skill Embeddings for Physically Simulated Characters"  
 https://xbpeng.github.io/projects/ASE/index.html

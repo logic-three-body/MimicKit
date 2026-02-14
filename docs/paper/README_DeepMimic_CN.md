@@ -91,7 +91,7 @@ DeepMimic著名的三个稳定化组件：
 你可以继续看：
 
 - `docs/paper_code/README_DeepMimic_TheoryCode.md`
-- `docs/README_DeepMimic.md`
+- `docs/methods/README_DeepMimic.md`
 
 ## 7. 新手最容易误解的点
 

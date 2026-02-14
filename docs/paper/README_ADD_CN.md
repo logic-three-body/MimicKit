@@ -85,7 +85,7 @@ ADD将多个目标差异压缩到“差分空间”，让判别器自动学习�
 对应文档：
 
 - `docs/paper_code/README_ADD_TheoryCode.md`
-- `docs/README_ADD.md`
+- `docs/methods/README_ADD.md`
 
 ## 7. 新手常见坑
 

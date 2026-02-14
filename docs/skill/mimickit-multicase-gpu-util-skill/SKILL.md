@@ -16,7 +16,7 @@ Run all trainable cases from `args/*.txt` with a consistent dual-GPU benchmark p
 
 - Case list source: `args/*.txt`
 - Benchmark script: `scripts/run_case_gpu_bench.py`
-- Case catalog doc: `docs/README_MimicKit_CaseCatalog.md`
+- Case catalog doc: `docs/benchmarks/README_MimicKit_CaseCatalog.md`
 
 ## Runtime Baseline (this host)
 

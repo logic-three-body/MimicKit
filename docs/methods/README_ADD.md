@@ -1,6 +1,6 @@
 # ADD
 
-![ADD](../images/ADD_teaser.png)
+![ADD](../../images/ADD_teaser.png)
 
 论文主页："Physics-Based Motion Imitation with Adversarial Differential Discriminators"  
 https://xbpeng.github.io/projects/ADD/index.html

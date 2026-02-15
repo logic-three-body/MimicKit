@@ -58,6 +58,12 @@ python -u scripts/run_case_longcycle.py \
 - `--default-ladder 512,256,128,64,32`
 - `--pi-plus-ladder 40,39,38,36,32,24,16,8,4,2,1`
 - `--amp-pi-plus-ladder 38,36,32,24,16,8,4,2,1`
+- `--resume-skip-status ok` (reuse finished cases in existing `root_out`)
+
+`--resume-skip-status` modes:
+- `ok` (default): skip only cases whose previous `final_ok=1`
+- `all`: skip any case with existing `attempts.json` (including failed)
+- `none`: ignore existing attempts and rerun everything in selection
 
 ## Output Structure
 
@@ -73,6 +79,41 @@ For root `output/train/<root_out>/`:
   - `probe_train/` (stage output dir)
   - `long_train/` (stage output dir for trainable)
 - `runs/<case>/attempts.json`
+  - now written incrementally per stage (not only case end)
+  - `note` transitions: `in_progress_probe` -> `in_progress_long` -> `in_progress_test` -> `in_progress_viz` -> `ok`
+
+## Interruption Resume (Power Loss / Reboot / SSH Drop)
+
+If execution is interrupted, resume with the same `root_out`.
+
+Example:
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-max-samples 30000000 \
+  --root-out case_longcycle_full_20260212_211318 \
+  --resume-skip-status ok
+```
+
+Behavior:
+- script scans `output/train/<root_out>/runs/*/attempts.json`
+- cases with `final_ok=1` are reused and skipped
+- unfinished/failed cases continue from stage-level:
+  - if `probe_ok=1`, resume starts from long stage
+  - if `long_ok=1`, resume starts from test stage
+  - if `test_ok=1`, resume starts from viz stage
+  - if currently `in_progress_probe`, resume restarts probe stage
+
+When to use other modes:
+- force full rerun: `--resume-skip-status none`
+- freeze current failed states and continue remaining: `--resume-skip-status all`
 
 ## Summary Fields (`best_by_case.tsv`)
 
@@ -142,4 +183,3 @@ python -u scripts/run_case_longcycle.py \
 - `amp_pi_plus` is stable with `hiutil e38`
 - `amp_pi_plus` often OOM at `hiutil e40/e39` on this host
 - `add_pi_plus` and `deepmimic_pi_plus` can pass at `hiutil e40`
-

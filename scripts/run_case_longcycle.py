@@ -163,6 +163,49 @@ def has_metric(text: str):
     return ('Mean Return:' in text) and ('Episodes:' in text)
 
 
+def load_existing_attempts(root_out: Path):
+    out = {}
+    runs_dir = root_out / 'runs'
+    if not runs_dir.exists():
+        return out
+
+    for p in sorted(runs_dir.glob('*/attempts.json')):
+        case_name = normalize_case_name(f'{p.parent.name}.txt')
+        try:
+            arr = json.loads(p.read_text())
+        except Exception:
+            continue
+        if not isinstance(arr, list) or not arr:
+            continue
+
+        final = arr[-1] if isinstance(arr[-1], dict) else {}
+        out[case_name] = {
+            'attempts': arr,
+            'final': final,
+        }
+
+    return out
+
+
+def load_case_attempts(case_run_dir: Path):
+    p = case_run_dir / 'attempts.json'
+    if not p.exists():
+        return []
+    try:
+        arr = json.loads(p.read_text())
+    except Exception:
+        return []
+    if not isinstance(arr, list):
+        return []
+    return [x for x in arr if isinstance(x, dict)]
+
+
+def save_case_attempts(case_run_dir: Path, attempts):
+    case_run_dir.mkdir(parents=True, exist_ok=True)
+    with (case_run_dir / 'attempts.json').open('w') as f:
+        json.dump(attempts, f, indent=2)
+
+
 def pick_agent_variants(case_name: str, base_agent: str):
     out = []
     hi = HIUTIL_AGENT_BY_CASE.get(case_name, '')
@@ -216,6 +259,7 @@ def main():
     ap.add_argument('--nontrainable-num-envs', type=int, default=1)
     ap.add_argument('--nontrainable-max-samples', type=int, default=128)
     ap.add_argument('--root-out', default='')
+    ap.add_argument('--resume-skip-status', choices=['ok', 'all', 'none'], default='ok')
     ap.add_argument('--require-deps', default='torch,newton,warp,scipy,trimesh,pyglet')
     args = ap.parse_args()
 
@@ -314,6 +358,20 @@ def main():
         f'probe_timeout={args.probe_timeout}s long_timeout={args.long_timeout}s',
         flush=True,
     )
+    print(f'[INFO] resume_skip_status={args.resume_skip_status}', flush=True)
+
+    existing_attempts = load_existing_attempts(root_out)
+    if existing_attempts:
+        existing_ok = 0
+        for row in existing_attempts.values():
+            final = row.get('final', {})
+            if int(final.get('final_ok', 0)) == 1:
+                existing_ok += 1
+        print(
+            f'[INFO] existing_attempts={len(existing_attempts)} '
+            f'existing_ok={existing_ok} existing_fail_or_unfinished={len(existing_attempts) - existing_ok}',
+            flush=True,
+        )
 
     with (root_out / 'progress.json').open('w') as f:
         json.dump(
@@ -335,6 +393,7 @@ def main():
         is_trainable = (case_type == 'trainable')
         arg_rel = f'args/{case_name}'
         base_agent = case['agent_config']
+        existing = existing_attempts.get(case_name)
 
         with (root_out / 'progress.json').open('w') as f:
             json.dump(
@@ -347,6 +406,37 @@ def main():
                 f,
                 indent=2,
             )
+
+        if existing and args.resume_skip_status != 'none':
+            prev_final = dict(existing.get('final', {}))
+            prev_ok = int(prev_final.get('final_ok', 0)) == 1
+            should_reuse = (args.resume_skip_status == 'all') or (args.resume_skip_status == 'ok' and prev_ok)
+            if should_reuse:
+                prev_final.setdefault('case', case_name)
+                prev_final.setdefault('method', case['method'])
+                prev_final.setdefault('case_type', case_type)
+                prev_final.setdefault('note', 'reused')
+                results.append(prev_final)
+
+                print(f"\n[CASE {idx}/{len(selected)}] {case_name} ({case_type})", flush=True)
+                print(
+                    f"  [RESUME] reused existing result final_ok={int(prev_ok)} "
+                    f"note={prev_final.get('note', '')}",
+                    flush=True,
+                )
+
+                with (root_out / 'progress.json').open('w') as f:
+                    json.dump(
+                        {
+                            'done': idx,
+                            'total': len(selected),
+                            'last_case': case_name,
+                            'status': 'reused_case',
+                        },
+                        f,
+                        indent=2,
+                    )
+                continue
 
         if is_trainable:
             if case_name == AMP_PI_PLUS_CASE:
@@ -369,7 +459,13 @@ def main():
         print(f"  [DEVICES] {case_devices}", flush=True)
 
         final = None
-        all_attempts = []
+        case_run_dir = root_out / 'runs' / case_name.replace('.txt', '')
+        if args.resume_skip_status == 'none':
+            all_attempts = []
+        else:
+            all_attempts = load_case_attempts(case_run_dir)
+        if all_attempts:
+            print(f"  [RESUME] loaded {len(all_attempts)} prior attempts", flush=True)
 
         for variant_name, agent_cfg in variants:
             for num_envs in ladder:
@@ -393,81 +489,82 @@ def main():
                 env.update(NCCL_ENV)
                 env['PYTHONUNBUFFERED'] = '1'
 
-                probe_cmd = [
-                    str(TRAIN_PY), str(RUN_PY),
-                    '--arg_file', arg_rel,
-                    '--engine_config', args.engine_config,
-                    '--mode', 'train',
-                    '--visualize', 'false',
-                    '--devices', *case_devices,
-                    '--num_envs', str(num_envs),
-                    '--max_samples', str(probe_samples),
-                    '--out_dir', str(probe_out),
-                    '--master_port', str(random.randint(20000, 45000)),
-                ]
-                if agent_cfg:
-                    probe_cmd.extend(['--agent_config', agent_cfg])
+                attempt_idx = None
+                for i in range(len(all_attempts) - 1, -1, -1):
+                    a = all_attempts[i]
+                    if a.get('variant') == variant_name and int(a.get('num_envs', -1)) == num_envs:
+                        attempt_idx = i
+                        break
 
-                probe_rc, probe_to, probe_text, probe_elapsed = run_cmd(
-                    probe_cmd,
-                    env,
-                    ROOT,
-                    probe_log,
-                    args.probe_timeout,
-                )
+                if attempt_idx is None:
+                    attempt = {
+                        'case': case_name,
+                        'method': case['method'],
+                        'case_type': case_type,
+                        'variant': variant_name,
+                        'agent_config': agent_cfg,
+                        'num_envs': num_envs,
+                        'probe_rc': -1,
+                        'probe_ok': 0,
+                        'probe_timeout': 0,
+                        'long_rc': -1,
+                        'long_ok': 0,
+                        'long_timeout': 0,
+                        'long_max_samples': int(args.long_max_samples if is_trainable else 0),
+                        'test_rc': -1,
+                        'test_ok': 0,
+                        'viz_rc': -1,
+                        'viz_ok': 0,
+                        'probe_elapsed_sec': 0.0,
+                        'long_elapsed_sec': 0.0,
+                        'test_elapsed_sec': 0.0,
+                        'viz_elapsed_sec': 0.0,
+                        'stage_elapsed_sec': 0.0,
+                        'final_ok': 0,
+                        'note': 'in_progress_probe',
+                        'out_dir': str(out_dir),
+                        'probe_out_dir': str(probe_out),
+                        'long_out_dir': str(long_out if is_trainable else ''),
+                        'probe_train_log': str(probe_log),
+                        'long_train_log': str(long_log),
+                        'test_log': str(test_log),
+                        'viz_log': str(viz_log),
+                    }
+                    all_attempts.append(attempt)
+                    attempt_idx = len(all_attempts) - 1
+                else:
+                    attempt = dict(all_attempts[attempt_idx])
 
-                probe_ok = (
-                    probe_rc == 0
+                attempt['case'] = case_name
+                attempt['method'] = case['method']
+                attempt['case_type'] = case_type
+                attempt['variant'] = variant_name
+                attempt['agent_config'] = agent_cfg
+                attempt['num_envs'] = num_envs
+                attempt['long_max_samples'] = int(args.long_max_samples if is_trainable else 0)
+                attempt['out_dir'] = str(out_dir)
+                attempt['probe_out_dir'] = str(probe_out)
+                attempt['long_out_dir'] = str(long_out if is_trainable else '')
+                attempt['probe_train_log'] = str(probe_log)
+                attempt['long_train_log'] = str(long_log)
+                attempt['test_log'] = str(test_log)
+                attempt['viz_log'] = str(viz_log)
+
+                prev_stage_elapsed = float(attempt.get('stage_elapsed_sec', 0.0) or 0.0)
+                all_attempts[attempt_idx] = attempt
+                save_case_attempts(case_run_dir, all_attempts)
+
+                probe_ready = (
+                    int(attempt.get('probe_ok', 0)) == 1
                     and (probe_out / 'model.pt').exists()
                     and (probe_out / 'log.txt').exists()
                 )
+                if not probe_ready:
+                    attempt['note'] = 'in_progress_probe'
+                    all_attempts[attempt_idx] = attempt
+                    save_case_attempts(case_run_dir, all_attempts)
 
-                attempt = {
-                    'case': case_name,
-                    'method': case['method'],
-                    'case_type': case_type,
-                    'variant': variant_name,
-                    'agent_config': agent_cfg,
-                    'num_envs': num_envs,
-                    'probe_rc': probe_rc,
-                    'probe_ok': int(probe_ok),
-                    'probe_timeout': int(probe_to),
-                    'long_rc': -1,
-                    'long_ok': 0,
-                    'long_timeout': 0,
-                    'long_max_samples': int(args.long_max_samples if is_trainable else 0),
-                    'test_rc': -1,
-                    'test_ok': 0,
-                    'viz_rc': -1,
-                    'viz_ok': 0,
-                    'probe_elapsed_sec': round(probe_elapsed, 2),
-                    'long_elapsed_sec': 0.0,
-                    'test_elapsed_sec': 0.0,
-                    'viz_elapsed_sec': 0.0,
-                    'stage_elapsed_sec': 0.0,
-                    'final_ok': 0,
-                    'note': '',
-                    'out_dir': str(out_dir),
-                    'probe_out_dir': str(probe_out),
-                    'long_out_dir': str(long_out if is_trainable else ''),
-                    'probe_train_log': str(probe_log),
-                    'long_train_log': str(long_log),
-                    'test_log': str(test_log),
-                    'viz_log': str(viz_log),
-                }
-
-                if not probe_ok:
-                    note = classify_train_error(probe_text, 'probe')
-                    if probe_rc == 124 or probe_to:
-                        note = 'probe_timeout'
-                    attempt['note'] = note
-                    attempt['stage_elapsed_sec'] = round(time.time() - attempt_start, 2)
-                    all_attempts.append(attempt)
-                    print(f"  [TRY {variant_name} e{num_envs}] {note}", flush=True)
-                    continue
-
-                if is_trainable:
-                    long_cmd = [
+                    probe_cmd = [
                         str(TRAIN_PY), str(RUN_PY),
                         '--arg_file', arg_rel,
                         '--engine_config', args.engine_config,
@@ -475,40 +572,104 @@ def main():
                         '--visualize', 'false',
                         '--devices', *case_devices,
                         '--num_envs', str(num_envs),
-                        '--max_samples', str(args.long_max_samples),
-                        '--out_dir', str(long_out),
-                        '--model_file', str(probe_out / 'model.pt'),
+                        '--max_samples', str(probe_samples),
+                        '--out_dir', str(probe_out),
                         '--master_port', str(random.randint(20000, 45000)),
                     ]
                     if agent_cfg:
-                        long_cmd.extend(['--agent_config', agent_cfg])
+                        probe_cmd.extend(['--agent_config', agent_cfg])
 
-                    long_rc, long_to, long_text, long_elapsed = run_cmd(
-                        long_cmd,
+                    probe_rc, probe_to, probe_text, probe_elapsed = run_cmd(
+                        probe_cmd,
                         env,
                         ROOT,
-                        long_log,
-                        args.long_timeout,
+                        probe_log,
+                        args.probe_timeout,
                     )
-                    long_ok = (
-                        long_rc == 0
+                    probe_ok = (
+                        probe_rc == 0
+                        and (probe_out / 'model.pt').exists()
+                        and (probe_out / 'log.txt').exists()
+                    )
+
+                    attempt['probe_rc'] = probe_rc
+                    attempt['probe_ok'] = int(probe_ok)
+                    attempt['probe_timeout'] = int(probe_to)
+                    attempt['probe_elapsed_sec'] = round(float(attempt.get('probe_elapsed_sec', 0.0) or 0.0) + probe_elapsed, 2)
+
+                    if not probe_ok:
+                        note = classify_train_error(probe_text, 'probe')
+                        if probe_rc == 124 or probe_to:
+                            note = 'probe_timeout'
+                        attempt['note'] = note
+                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                        all_attempts[attempt_idx] = attempt
+                        save_case_attempts(case_run_dir, all_attempts)
+                        print(f"  [TRY {variant_name} e{num_envs}] {note}", flush=True)
+                        continue
+                else:
+                    print(f"  [TRY {variant_name} e{num_envs}] resume: skip probe", flush=True)
+
+                if is_trainable:
+                    long_ready = (
+                        int(attempt.get('long_ok', 0)) == 1
                         and (long_out / 'model.pt').exists()
                         and (long_out / 'log.txt').exists()
                     )
-                    attempt['long_rc'] = long_rc
-                    attempt['long_ok'] = int(long_ok)
-                    attempt['long_timeout'] = int(long_to)
-                    attempt['long_elapsed_sec'] = round(long_elapsed, 2)
+                    if not long_ready:
+                        attempt['note'] = 'in_progress_long'
+                        all_attempts[attempt_idx] = attempt
+                        save_case_attempts(case_run_dir, all_attempts)
 
-                    if not long_ok:
-                        note = classify_train_error(long_text, 'long')
-                        if long_rc == 124 or long_to:
-                            note = 'long_timeout'
-                        attempt['note'] = note
-                        attempt['stage_elapsed_sec'] = round(time.time() - attempt_start, 2)
-                        all_attempts.append(attempt)
-                        print(f"  [TRY {variant_name} e{num_envs}] probe=ok {note}", flush=True)
-                        continue
+                        long_model_file = long_out / 'model.pt'
+                        if not long_model_file.exists():
+                            long_model_file = probe_out / 'model.pt'
+
+                        long_cmd = [
+                            str(TRAIN_PY), str(RUN_PY),
+                            '--arg_file', arg_rel,
+                            '--engine_config', args.engine_config,
+                            '--mode', 'train',
+                            '--visualize', 'false',
+                            '--devices', *case_devices,
+                            '--num_envs', str(num_envs),
+                            '--max_samples', str(args.long_max_samples),
+                            '--out_dir', str(long_out),
+                            '--model_file', str(long_model_file),
+                            '--master_port', str(random.randint(20000, 45000)),
+                        ]
+                        if agent_cfg:
+                            long_cmd.extend(['--agent_config', agent_cfg])
+
+                        long_rc, long_to, long_text, long_elapsed = run_cmd(
+                            long_cmd,
+                            env,
+                            ROOT,
+                            long_log,
+                            args.long_timeout,
+                        )
+                        long_ok = (
+                            long_rc == 0
+                            and (long_out / 'model.pt').exists()
+                            and (long_out / 'log.txt').exists()
+                        )
+                        attempt['long_rc'] = long_rc
+                        attempt['long_ok'] = int(long_ok)
+                        attempt['long_timeout'] = int(long_to)
+                        attempt['long_elapsed_sec'] = round(float(attempt.get('long_elapsed_sec', 0.0) or 0.0) + long_elapsed, 2)
+
+                        if not long_ok:
+                            note = classify_train_error(long_text, 'long')
+                            if long_rc == 124 or long_to:
+                                note = 'long_timeout'
+                            attempt['note'] = note
+                            attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                            all_attempts[attempt_idx] = attempt
+                            save_case_attempts(case_run_dir, all_attempts)
+                            print(f"  [TRY {variant_name} e{num_envs}] probe=ok {note}", flush=True)
+                            continue
+                    else:
+                        print(f"  [TRY {variant_name} e{num_envs}] resume: skip long", flush=True)
 
                     eval_model = long_out / 'model.pt'
                 else:
@@ -516,84 +677,108 @@ def main():
                     attempt['long_rc'] = 0
                     attempt['long_ok'] = 1
                     attempt['long_timeout'] = 0
-                    attempt['long_elapsed_sec'] = 0.0
                     eval_model = probe_out / 'model.pt'
 
-                test_cmd = [
-                    str(TRAIN_PY), str(RUN_PY),
-                    '--arg_file', arg_rel,
-                    '--engine_config', args.engine_config,
-                    '--mode', 'test',
-                    '--visualize', 'false',
-                    '--devices', 'cuda:0',
-                    '--num_envs', '1',
-                    '--test_episodes', str(args.test_episodes),
-                    '--model_file', str(eval_model),
-                ]
-                if agent_cfg:
-                    test_cmd.extend(['--agent_config', agent_cfg])
+                test_ready = False
+                if int(attempt.get('test_ok', 0)) == 1 and test_log.exists():
+                    test_ready = has_metric(test_log.read_text(errors='ignore'))
 
-                test_rc, test_to, test_text, test_elapsed = run_cmd(
-                    test_cmd,
-                    env,
-                    ROOT,
-                    test_log,
-                    args.test_timeout,
-                )
-                test_ok = (test_rc == 0 and has_metric(test_text))
-                attempt['test_rc'] = test_rc
-                attempt['test_ok'] = int(test_ok)
-                attempt['test_elapsed_sec'] = round(test_elapsed, 2)
+                if not test_ready:
+                    attempt['note'] = 'in_progress_test'
+                    all_attempts[attempt_idx] = attempt
+                    save_case_attempts(case_run_dir, all_attempts)
 
-                if not test_ok:
-                    attempt['note'] = 'test_timeout' if (test_rc == 124 or test_to) else 'test_failed'
-                    attempt['stage_elapsed_sec'] = round(time.time() - attempt_start, 2)
-                    all_attempts.append(attempt)
-                    print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=fail", flush=True)
-                    continue
+                    test_cmd = [
+                        str(TRAIN_PY), str(RUN_PY),
+                        '--arg_file', arg_rel,
+                        '--engine_config', args.engine_config,
+                        '--mode', 'test',
+                        '--visualize', 'false',
+                        '--devices', 'cuda:0',
+                        '--num_envs', '1',
+                        '--test_episodes', str(args.test_episodes),
+                        '--model_file', str(eval_model),
+                    ]
+                    if agent_cfg:
+                        test_cmd.extend(['--agent_config', agent_cfg])
 
-                viz_cmd = [
-                    str(TRAIN_PY), str(RUN_PY),
-                    '--arg_file', arg_rel,
-                    '--engine_config', args.engine_config,
-                    '--mode', 'test',
-                    '--visualize', 'true',
-                    '--devices', 'cuda:0',
-                    '--num_envs', '1',
-                    '--test_episodes', str(args.viz_episodes),
-                    '--model_file', str(eval_model),
-                ]
-                if agent_cfg:
-                    viz_cmd.extend(['--agent_config', agent_cfg])
+                    test_rc, test_to, test_text, test_elapsed = run_cmd(
+                        test_cmd,
+                        env,
+                        ROOT,
+                        test_log,
+                        args.test_timeout,
+                    )
+                    test_ok = (test_rc == 0 and has_metric(test_text))
+                    attempt['test_rc'] = test_rc
+                    attempt['test_ok'] = int(test_ok)
+                    attempt['test_elapsed_sec'] = round(float(attempt.get('test_elapsed_sec', 0.0) or 0.0) + test_elapsed, 2)
 
-                viz_env = dict(env)
-                viz_env.update(MESA_ENV)
-                viz_rc, viz_to, viz_text, viz_elapsed = run_cmd(
-                    viz_cmd,
-                    viz_env,
-                    ROOT,
-                    viz_log,
-                    args.viz_timeout,
-                )
-                viz_ok = (viz_rc == 0 and has_metric(viz_text))
-                attempt['viz_rc'] = viz_rc
-                attempt['viz_ok'] = int(viz_ok)
-                attempt['viz_elapsed_sec'] = round(viz_elapsed, 2)
+                    if not test_ok:
+                        attempt['note'] = 'test_timeout' if (test_rc == 124 or test_to) else 'test_failed'
+                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                        all_attempts[attempt_idx] = attempt
+                        save_case_attempts(case_run_dir, all_attempts)
+                        print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=fail", flush=True)
+                        continue
+                else:
+                    print(f"  [TRY {variant_name} e{num_envs}] resume: skip test", flush=True)
 
-                if not viz_ok:
-                    note = 'viz_timeout' if (viz_rc == 124 or viz_to) else 'viz_failed'
-                    if 'GLSL 1.50 is not supported' in viz_text:
-                        note = 'viz_glsl_version'
-                    attempt['note'] = note
-                    attempt['stage_elapsed_sec'] = round(time.time() - attempt_start, 2)
-                    all_attempts.append(attempt)
-                    print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=ok viz=fail({note})", flush=True)
-                    continue
+                viz_ready = False
+                if int(attempt.get('viz_ok', 0)) == 1 and viz_log.exists():
+                    viz_ready = has_metric(viz_log.read_text(errors='ignore'))
+
+                if not viz_ready:
+                    attempt['note'] = 'in_progress_viz'
+                    all_attempts[attempt_idx] = attempt
+                    save_case_attempts(case_run_dir, all_attempts)
+
+                    viz_cmd = [
+                        str(TRAIN_PY), str(RUN_PY),
+                        '--arg_file', arg_rel,
+                        '--engine_config', args.engine_config,
+                        '--mode', 'test',
+                        '--visualize', 'true',
+                        '--devices', 'cuda:0',
+                        '--num_envs', '1',
+                        '--test_episodes', str(args.viz_episodes),
+                        '--model_file', str(eval_model),
+                    ]
+                    if agent_cfg:
+                        viz_cmd.extend(['--agent_config', agent_cfg])
+
+                    viz_env = dict(env)
+                    viz_env.update(MESA_ENV)
+                    viz_rc, viz_to, viz_text, viz_elapsed = run_cmd(
+                        viz_cmd,
+                        viz_env,
+                        ROOT,
+                        viz_log,
+                        args.viz_timeout,
+                    )
+                    viz_ok = (viz_rc == 0 and has_metric(viz_text))
+                    attempt['viz_rc'] = viz_rc
+                    attempt['viz_ok'] = int(viz_ok)
+                    attempt['viz_elapsed_sec'] = round(float(attempt.get('viz_elapsed_sec', 0.0) or 0.0) + viz_elapsed, 2)
+
+                    if not viz_ok:
+                        note = 'viz_timeout' if (viz_rc == 124 or viz_to) else 'viz_failed'
+                        if 'GLSL 1.50 is not supported' in viz_text:
+                            note = 'viz_glsl_version'
+                        attempt['note'] = note
+                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                        all_attempts[attempt_idx] = attempt
+                        save_case_attempts(case_run_dir, all_attempts)
+                        print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=ok viz=fail({note})", flush=True)
+                        continue
+                else:
+                    print(f"  [TRY {variant_name} e{num_envs}] resume: skip viz", flush=True)
 
                 attempt['final_ok'] = 1
                 attempt['note'] = 'ok'
-                attempt['stage_elapsed_sec'] = round(time.time() - attempt_start, 2)
-                all_attempts.append(attempt)
+                attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                all_attempts[attempt_idx] = attempt
+                save_case_attempts(case_run_dir, all_attempts)
                 final = attempt
                 print(f"  [TRY {variant_name} e{num_envs}] final=ok", flush=True)
                 break
@@ -640,11 +825,7 @@ def main():
                 }
 
         results.append(final)
-
-        case_run_dir = root_out / 'runs' / case_name.replace('.txt', '')
-        case_run_dir.mkdir(parents=True, exist_ok=True)
-        with (case_run_dir / 'attempts.json').open('w') as f:
-            json.dump(all_attempts, f, indent=2)
+        save_case_attempts(case_run_dir, all_attempts)
 
         with (root_out / 'progress.json').open('w') as f:
             json.dump(

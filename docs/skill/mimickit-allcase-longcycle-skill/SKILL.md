@@ -180,6 +180,30 @@ python -u scripts/run_case_longcycle.py \
 
 ## Known Host Behavior
 
-- `amp_pi_plus` is stable with `hiutil e38`
 - `amp_pi_plus` often OOM at `hiutil e40/e39` on this host
+- `amp_pi_plus` short/e2e runs can pass at `hiutil e38`; this longcycle snapshot converged at `hiutil e36`
 - `add_pi_plus` and `deepmimic_pi_plus` can pass at `hiutil e40`
+
+## Latest Verified Snapshot (2026-02-17)
+
+Validated full longcycle run:
+- root: `output/train/case_longcycle_full_20260212_211318`
+- result: `32/32` cases `final_ok=1`
+- split: `25/25` trainable, `7/7` nontrainable
+
+Observed final pi-plus picks in this run:
+- `add_pi_plus_args.txt`: `hiutil e40`
+- `deepmimic_pi_plus_ppo_args.txt`: `hiutil e40`
+- `amp_pi_plus_args.txt`: `hiutil e36`
+
+Quick validate command:
+
+```bash
+python - <<'PY'
+import csv
+path='output/train/case_longcycle_full_20260212_211318/best_by_case.tsv'
+rows=list(csv.DictReader(open(path), delimiter='\t'))
+ok=sum(1 for r in rows if str(r.get('final_ok','')).strip()=='1')
+print('total=', len(rows), 'ok=', ok, 'fail=', len(rows)-ok)
+PY
+```

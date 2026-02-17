@@ -22,6 +22,7 @@
 
 - `docs/benchmarks/README_MimicKit_CaseCatalog.md`
 - `docs/benchmarks/README_MimicKit_GPUCaseBenchmark.md`
+- `docs/benchmarks/README_MimicKit_AllCaseLongcycle.md`
 - `docs/benchmarks/README_GPU_AgentProfiles.md`
 
 适合查：case 清单、GPU 利用率、性能配置对比。

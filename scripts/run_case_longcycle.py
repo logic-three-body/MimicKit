@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -159,6 +160,87 @@ def run_cmd(cmd, env, cwd: Path, log_path: Path, timeout_s: int):
     return rc, timed_out, text, elapsed
 
 
+def parse_signal_name(name: str):
+    sig = getattr(signal, name, None)
+    if sig is None:
+        return signal.SIGINT
+    return sig
+
+
+def run_cmd_time_budget(cmd, env, cwd: Path, log_path: Path, budget_s: float, stop_sig, grace_s: int):
+    ensure_parent(log_path)
+    start = time.time()
+    with log_path.open('w') as f:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
+
+    reached_budget = False
+    stop_reason = 'long_exit'
+
+    try:
+        if budget_s and budget_s > 0:
+            proc.wait(timeout=float(budget_s))
+        else:
+            proc.wait()
+    except subprocess.TimeoutExpired:
+        reached_budget = True
+        stop_reason = f'long_budget_reached_{signal.Signals(stop_sig).name}'
+        try:
+            os.killpg(os.getpgid(proc.pid), stop_sig)
+        except Exception:
+            stop_reason = f'long_budget_signal_failed_{signal.Signals(stop_sig).name}'
+
+        try:
+            proc.wait(timeout=max(1, int(grace_s)))
+        except subprocess.TimeoutExpired:
+            stop_reason = 'long_budget_grace_term'
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                stop_reason = 'long_budget_force_kill'
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+
+    rc = proc.returncode if proc.returncode is not None else 124
+    elapsed = time.time() - start
+    text = log_path.read_text(errors='ignore') if log_path.exists() else ''
+    return rc, reached_budget, stop_reason, text, elapsed
+
+
+def has_train_iter_row(text: str):
+    for ln in text.splitlines():
+        if re.match(r'^\s*\d+\s+', ln):
+            return True
+    return False
+
+
+def has_fatal_train_marker(text: str, include_nccl: bool = True):
+    t = text.lower()
+    if 'array shapes must be non-negative' in text:
+        return True
+    if 'out of memory' in t or 'failed to allocate' in t or "cuda failure 2 'out of memory'" in t:
+        return True
+    if include_nccl and ('nccl' in t or 'distbackenderror' in t):
+        return True
+    return False
+
+
 def has_metric(text: str):
     return ('Mean Return:' in text) and ('Episodes:' in text)
 
@@ -248,7 +330,12 @@ def main():
     ap.add_argument('--amp-pi-plus-ladder', default='38,36,32,24,16,8,4,2,1')
     ap.add_argument('--include-nontrainable', dest='include_nontrainable', action='store_true', default=True)
     ap.add_argument('--exclude-nontrainable', dest='include_nontrainable', action='store_false')
+    ap.add_argument('--long-mode', choices=['max_samples', 'time_budget'], default='max_samples')
     ap.add_argument('--long-max-samples', type=int, default=30_000_000)
+    ap.add_argument('--long-budget-hours', type=float, default=24.0)
+    ap.add_argument('--long-budget-signal', choices=['SIGINT', 'SIGTERM'], default='SIGINT')
+    ap.add_argument('--long-budget-grace-sec', type=int, default=300)
+    ap.add_argument('--long-success-policy', choices=['strict_exit', 'budget_checkpoint'], default='strict_exit')
     ap.add_argument('--probe-iters', type=int, default=8)
     ap.add_argument('--probe-timeout', type=int, default=900)
     ap.add_argument('--long-timeout', type=int, default=0)
@@ -276,6 +363,16 @@ def main():
     if not amp_pi_plus_ladder:
         amp_pi_plus_ladder = [38, 36, 32, 24, 16, 8, 4, 2, 1]
 
+    if args.long_mode == 'time_budget' and args.long_budget_hours <= 0:
+        print('[ERROR] --long-budget-hours must be > 0 when --long-mode=time_budget')
+        return 2
+    if args.long_budget_grace_sec < 1:
+        print('[ERROR] --long-budget-grace-sec must be >= 1')
+        return 2
+
+    long_budget_target_sec = max(0, int(round(args.long_budget_hours * 3600.0)))
+    long_budget_signal = parse_signal_name(args.long_budget_signal)
+
     req_mods = parse_csv(args.require_deps)
     missing = check_python_deps(req_mods)
     if missing:
@@ -285,7 +382,11 @@ def main():
         return 2
 
     ts = time.strftime('%Y%m%d_%H%M%S')
-    root_out = ROOT / 'output' / 'train' / (args.root_out if args.root_out else f'case_longcycle_{ts}')
+    if args.root_out:
+        root_name = args.root_out
+    else:
+        root_name = f'case_ultralong_{ts}' if args.long_mode == 'time_budget' else f'case_longcycle_{ts}'
+    root_out = ROOT / 'output' / 'train' / root_name
     root_out.mkdir(parents=True, exist_ok=True)
 
     manifest = []
@@ -354,8 +455,14 @@ def main():
     print(f'[INFO] train_devices={train_devices}', flush=True)
     print(f'[INFO] nontrainable_devices={nontrain_devices}', flush=True)
     print(
-        f'[INFO] long_max_samples={args.long_max_samples} probe_iters={args.probe_iters} '
-        f'probe_timeout={args.probe_timeout}s long_timeout={args.long_timeout}s',
+        f'[INFO] long_mode={args.long_mode} long_max_samples={args.long_max_samples} '
+        f'long_budget_hours={args.long_budget_hours:.3f} long_budget_signal={args.long_budget_signal} '
+        f'long_budget_grace_sec={args.long_budget_grace_sec} long_success_policy={args.long_success_policy}',
+        flush=True,
+    )
+    print(
+        f'[INFO] probe_iters={args.probe_iters} probe_timeout={args.probe_timeout}s '
+        f'long_timeout={args.long_timeout}s',
         flush=True,
     )
     print(f'[INFO] resume_skip_status={args.resume_skip_status}', flush=True)
@@ -416,6 +523,13 @@ def main():
                 prev_final.setdefault('method', case['method'])
                 prev_final.setdefault('case_type', case_type)
                 prev_final.setdefault('note', 'reused')
+                prev_final.setdefault('long_mode', (args.long_mode if is_trainable else 'bootstrap'))
+                prev_final.setdefault('long_budget_hours', 0.0)
+                prev_final.setdefault('long_budget_target_sec', 0)
+                prev_final.setdefault('long_budget_elapsed_sec', 0.0)
+                prev_final.setdefault('long_budget_reached', 0)
+                prev_final.setdefault('long_budget_signal', '')
+                prev_final.setdefault('long_stop_reason', '')
                 results.append(prev_final)
 
                 print(f"\n[CASE {idx}/{len(selected)}] {case_name} ({case_type})", flush=True)
@@ -510,7 +624,14 @@ def main():
                         'long_rc': -1,
                         'long_ok': 0,
                         'long_timeout': 0,
-                        'long_max_samples': int(args.long_max_samples if is_trainable else 0),
+                        'long_mode': (args.long_mode if is_trainable else 'bootstrap'),
+                        'long_max_samples': int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0),
+                        'long_budget_hours': float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0),
+                        'long_budget_target_sec': int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0),
+                        'long_budget_elapsed_sec': 0.0,
+                        'long_budget_reached': 0,
+                        'long_budget_signal': (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else ''),
+                        'long_stop_reason': '',
                         'test_rc': -1,
                         'test_ok': 0,
                         'viz_rc': -1,
@@ -541,7 +662,18 @@ def main():
                 attempt['variant'] = variant_name
                 attempt['agent_config'] = agent_cfg
                 attempt['num_envs'] = num_envs
-                attempt['long_max_samples'] = int(args.long_max_samples if is_trainable else 0)
+                attempt['long_mode'] = (args.long_mode if is_trainable else 'bootstrap')
+                attempt['long_max_samples'] = int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0)
+                attempt['long_budget_hours'] = float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0)
+                attempt['long_budget_target_sec'] = int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0)
+                if is_trainable and args.long_mode == 'time_budget':
+                    attempt['long_budget_elapsed_sec'] = float(attempt.get('long_budget_elapsed_sec', 0.0) or 0.0)
+                    attempt['long_budget_reached'] = int(attempt.get('long_budget_reached', 0) or 0)
+                else:
+                    attempt['long_budget_elapsed_sec'] = 0.0
+                    attempt['long_budget_reached'] = 0
+                attempt['long_budget_signal'] = (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else '')
+                attempt['long_stop_reason'] = str(attempt.get('long_stop_reason', '') or '')
                 attempt['out_dir'] = str(out_dir)
                 attempt['probe_out_dir'] = str(probe_out)
                 attempt['long_out_dir'] = str(long_out if is_trainable else '')
@@ -633,35 +765,95 @@ def main():
                             '--visualize', 'false',
                             '--devices', *case_devices,
                             '--num_envs', str(num_envs),
-                            '--max_samples', str(args.long_max_samples),
                             '--out_dir', str(long_out),
                             '--model_file', str(long_model_file),
                             '--master_port', str(random.randint(20000, 45000)),
                         ]
+                        if args.long_mode == 'max_samples':
+                            long_cmd.extend(['--max_samples', str(args.long_max_samples)])
                         if agent_cfg:
                             long_cmd.extend(['--agent_config', agent_cfg])
 
-                        long_rc, long_to, long_text, long_elapsed = run_cmd(
-                            long_cmd,
-                            env,
-                            ROOT,
-                            long_log,
-                            args.long_timeout,
-                        )
-                        long_ok = (
-                            long_rc == 0
-                            and (long_out / 'model.pt').exists()
-                            and (long_out / 'log.txt').exists()
-                        )
+                        long_stop_reason = ''
+                        if args.long_mode == 'max_samples':
+                            long_rc, long_to, long_text, long_elapsed = run_cmd(
+                                long_cmd,
+                                env,
+                                ROOT,
+                                long_log,
+                                args.long_timeout,
+                            )
+                            long_ok = (
+                                long_rc == 0
+                                and (long_out / 'model.pt').exists()
+                                and (long_out / 'log.txt').exists()
+                            )
+                            long_stop_reason = f'long_exit_rc_{long_rc}'
+                        else:
+                            prev_budget_elapsed = float(attempt.get('long_budget_elapsed_sec', 0.0) or 0.0)
+                            target_budget_sec = float(attempt.get('long_budget_target_sec', 0.0) or 0.0)
+                            remaining_budget_sec = max(0.0, target_budget_sec - prev_budget_elapsed)
+
+                            long_to = False
+                            long_rc = 0
+                            long_text = ''
+                            long_elapsed = 0.0
+                            reached_budget = False
+
+                            if remaining_budget_sec > 0:
+                                long_rc, reached_budget, long_stop_reason, long_text, long_elapsed = run_cmd_time_budget(
+                                    long_cmd,
+                                    env,
+                                    ROOT,
+                                    long_log,
+                                    remaining_budget_sec,
+                                    long_budget_signal,
+                                    args.long_budget_grace_sec,
+                                )
+                            else:
+                                long_stop_reason = 'long_budget_already_reached'
+                                reached_budget = bool(int(attempt.get('long_budget_reached', 0)))
+
+                            budget_elapsed = prev_budget_elapsed + float(long_elapsed)
+                            attempt['long_budget_elapsed_sec'] = round(budget_elapsed, 2)
+                            if reached_budget or budget_elapsed >= max(0.0, target_budget_sec - 1e-6):
+                                attempt['long_budget_reached'] = 1
+
+                            long_train_text = (long_out / 'log.txt').read_text(errors='ignore') if (long_out / 'log.txt').exists() else ''
+                            checkpoint_ok = (
+                                (long_out / 'model.pt').exists()
+                                and (long_out / 'log.txt').exists()
+                                and has_train_iter_row(long_train_text)
+                            )
+                            budget_reached_now = bool(int(attempt.get('long_budget_reached', 0)))
+                            fatal_marker = has_fatal_train_marker(long_text, include_nccl=(not budget_reached_now))
+
+                            if args.long_success_policy == 'strict_exit':
+                                long_ok = (long_rc == 0 and checkpoint_ok and (not fatal_marker))
+                            else:
+                                long_ok = (int(attempt.get('long_budget_reached', 0)) == 1 and checkpoint_ok and (not fatal_marker))
+
                         attempt['long_rc'] = long_rc
                         attempt['long_ok'] = int(long_ok)
                         attempt['long_timeout'] = int(long_to)
                         attempt['long_elapsed_sec'] = round(float(attempt.get('long_elapsed_sec', 0.0) or 0.0) + long_elapsed, 2)
+                        attempt['long_stop_reason'] = long_stop_reason
 
                         if not long_ok:
                             note = classify_train_error(long_text, 'long')
-                            if long_rc == 124 or long_to:
-                                note = 'long_timeout'
+                            if args.long_mode == 'max_samples':
+                                if long_rc == 124 or long_to:
+                                    note = 'long_timeout'
+                            else:
+                                budget_reached_now = bool(int(attempt.get('long_budget_reached', 0)))
+                                if has_fatal_train_marker(long_text, include_nccl=(not budget_reached_now)):
+                                    note = classify_train_error(long_text, 'long')
+                                elif int(attempt.get('long_budget_reached', 0)) == 1:
+                                    note = 'long_budget_invalid'
+                                elif long_rc != 0:
+                                    note = 'long_failed'
+                                else:
+                                    note = 'long_budget_incomplete'
                             attempt['note'] = note
                             attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
                             all_attempts[attempt_idx] = attempt
@@ -677,6 +869,7 @@ def main():
                     attempt['long_rc'] = 0
                     attempt['long_ok'] = 1
                     attempt['long_timeout'] = 0
+                    attempt['long_stop_reason'] = 'bootstrap_skipped_long'
                     eval_model = probe_out / 'model.pt'
 
                 test_ready = False
@@ -803,7 +996,14 @@ def main():
                     'long_rc': -1,
                     'long_ok': 0,
                     'long_timeout': 0,
-                    'long_max_samples': int(args.long_max_samples if is_trainable else 0),
+                    'long_mode': (args.long_mode if is_trainable else 'bootstrap'),
+                    'long_max_samples': int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0),
+                    'long_budget_hours': float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0),
+                    'long_budget_target_sec': int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0),
+                    'long_budget_elapsed_sec': 0.0,
+                    'long_budget_reached': 0,
+                    'long_budget_signal': (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else ''),
+                    'long_stop_reason': '',
                     'test_rc': -1,
                     'test_ok': 0,
                     'viz_rc': -1,
@@ -842,7 +1042,9 @@ def main():
     fields = [
         'case', 'method', 'case_type', 'variant', 'agent_config', 'num_envs',
         'probe_rc', 'probe_ok', 'probe_timeout',
-        'long_rc', 'long_ok', 'long_timeout', 'long_max_samples',
+        'long_rc', 'long_ok', 'long_timeout', 'long_mode', 'long_max_samples',
+        'long_budget_hours', 'long_budget_target_sec', 'long_budget_elapsed_sec',
+        'long_budget_reached', 'long_budget_signal', 'long_stop_reason',
         'test_rc', 'test_ok',
         'viz_rc', 'viz_ok',
         'probe_elapsed_sec', 'long_elapsed_sec', 'test_elapsed_sec', 'viz_elapsed_sec', 'stage_elapsed_sec',

@@ -47,9 +47,35 @@ python -u scripts/run_case_longcycle.py \
   --root-out case_longcycle_$(date +%Y%m%d_%H%M%S)
 ```
 
+## Time-Budget Ultralong Mode (24h Per Trainable Case)
+
+Use this mode for near-infinite long training with automatic stage switch to `test` / `viz`.
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out case_ultralong_full_$(date +%Y%m%d_%H%M%S)
+```
+
 ## Parameter Defaults
 
-- `--long-max-samples 30000000` (trainable only)
+- `--long-mode max_samples` (default)
+- `--long-max-samples 30000000` (trainable only in `max_samples` mode)
+- `--long-budget-hours 24.0` (only for `time_budget`)
+- `--long-budget-signal SIGINT` (only for `time_budget`)
+- `--long-budget-grace-sec 300` (only for `time_budget`)
+- `--long-success-policy strict_exit` (use `budget_checkpoint` for ultralong)
 - `--probe-iters 8`
 - `--probe-timeout 900`
 - `--long-timeout 0` (no timeout)
@@ -120,7 +146,10 @@ When to use other modes:
 Includes:
 - `probe_ok`, `probe_rc`
 - `long_ok`, `long_rc`
+- `long_mode`
 - `long_max_samples`
+- `long_budget_hours`, `long_budget_target_sec`, `long_budget_elapsed_sec`
+- `long_budget_reached`, `long_budget_signal`, `long_stop_reason`
 - `stage_elapsed_sec`
 - `final_ok`, `note`
 
@@ -128,8 +157,8 @@ Includes:
 
 ```bash
 TS=$(date +%Y%m%d_%H%M%S)
-ROOT="output/train/case_longcycle_<your_ts>"
-LOG="/tmp/mk_longcycle_report_${TS}.log"
+ROOT="output/train/case_ultralong_full_<your_ts>"
+LOG="/tmp/mk_ultralong_monitor_${TS}.log"
 
 while true; do
   {
@@ -137,6 +166,23 @@ while true; do
     nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw --format=csv,noheader
     cat "${ROOT}/progress.json" 2>/dev/null || echo "progress not ready"
     tail -n 20 "${ROOT}/best_by_case.tsv" 2>/dev/null || true
+    ROOT="${ROOT}" python - <<'PY' 2>/dev/null || true
+import glob, json, os
+root = os.environ.get('ROOT', '')
+runs = os.path.join(root, 'runs')
+rows = []
+for p in sorted(glob.glob(os.path.join(runs, '*', 'attempts.json'))):
+    try:
+        arr = json.load(open(p))
+    except Exception:
+        continue
+    if arr:
+        rows.append(arr[-1])
+if rows:
+    cur = rows[-1]
+    print('current_case_note', cur.get('case'), cur.get('note'))
+    print('budget_progress_sec', cur.get('long_budget_elapsed_sec'), '/', cur.get('long_budget_target_sec'))
+PY
     echo
   } | tee -a "${LOG}"
   sleep 180
@@ -148,7 +194,8 @@ done
 ```bash
 python - <<'PY'
 import csv, glob, os
-root = sorted(glob.glob('output/train/case_longcycle_*'))[-1]
+roots = sorted(glob.glob('output/train/case_ultralong_*') + glob.glob('output/train/case_longcycle_*'))
+root = roots[-1]
 path = os.path.join(root, 'best_by_case.tsv')
 rows = list(csv.DictReader(open(path), delimiter='\t'))
 ok = sum(1 for r in rows if str(r.get('final_ok')).strip() == '1')
@@ -207,3 +254,18 @@ ok=sum(1 for r in rows if str(r.get('final_ok','')).strip()=='1')
 print('total=', len(rows), 'ok=', ok, 'fail=', len(rows)-ok)
 PY
 ```
+
+## Time-Budget Smoke Snapshot (2026-02-17)
+
+Validated ultralong mode path with short budget:
+- root: `output/train/case_ultralong_smoke_20260217_120052`
+- cases: `deepmimic_humanoid_ppo_args.txt,view_motion_humanoid_args.txt`
+- long mode: `time_budget`
+- budget: `0.03h` (`108s`)
+- result: `2/2` `final_ok=1`
+
+Key check:
+- `deepmimic_humanoid_ppo_args.txt` completed with:
+  - `long_mode=time_budget`
+  - `long_budget_reached=1`
+  - `long_stop_reason=long_budget_reached_SIGINT`

@@ -15,6 +15,9 @@
   - `amp`: `1/1`, avg min util `51.54`
   - `deepmimic`: `1/1`, avg min util `52.03`
 
+See also:
+- `docs/benchmarks/README_MimicKit_GPUUtilizationPatterns.md` (case-level memory-vs-util patterns from benchmark + monitor logs)
+
 ## Final Status
 
 After applying pi-plus-specific dual-GPU ladder and hiutil agent variants:

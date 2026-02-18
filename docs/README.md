@@ -22,6 +22,7 @@
 
 - `docs/benchmarks/README_MimicKit_CaseCatalog.md`
 - `docs/benchmarks/README_MimicKit_GPUCaseBenchmark.md`
+- `docs/benchmarks/README_MimicKit_GPUUtilizationPatterns.md`
 - `docs/benchmarks/README_MimicKit_AllCaseLongcycle.md`
 - `docs/benchmarks/README_GPU_AgentProfiles.md`
 

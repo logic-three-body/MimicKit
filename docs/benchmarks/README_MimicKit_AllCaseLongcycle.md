@@ -91,6 +91,25 @@ python -u scripts/run_case_longcycle.py \
   --root-out case_longcycle_$(date +%Y%m%d_%H%M%S)
 ```
 
+Ultralong run (`time_budget`, 24h per trainable case):
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out case_ultralong_full_$(date +%Y%m%d_%H%M%S)
+```
+
 Resume after interruption (same root):
 
 ```bash
@@ -113,5 +132,30 @@ rows=list(csv.DictReader(open(path), delimiter='\t'))
 ok=sum(1 for r in rows if str(r.get('final_ok','')).strip()=='1')
 print('total=', len(rows), 'ok=', ok, 'fail=', len(rows)-ok)
 print('all_pass=', ok==len(rows)==32)
+PY
+```
+
+## Time-Budget Smoke Validation (2026-02-17)
+
+- root: `output/train/case_ultralong_smoke_20260217_120052`
+- cases: `deepmimic_humanoid_ppo_args.txt,view_motion_humanoid_args.txt`
+- mode: `time_budget`
+- budget: `0.03h` (`108s`)
+- result: `2/2` pass
+
+Trainable case key fields:
+- `long_mode=time_budget`
+- `long_budget_reached=1`
+- `long_stop_reason=long_budget_reached_SIGINT`
+
+Check command:
+
+```bash
+python - <<'PY'
+import csv
+path='output/train/case_ultralong_smoke_20260217_120052/best_by_case.tsv'
+rows=list(csv.DictReader(open(path), delimiter='\t'))
+for r in rows:
+    print(r['case'], r['final_ok'], r.get('long_mode'), r.get('long_budget_reached'), r.get('long_stop_reason'))
 PY
 ```

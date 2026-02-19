@@ -92,6 +92,13 @@ def parse_int_csv(text):
     return out
 
 
+def parse_int_or(value, default=-1):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
 def normalize_case_name(name: str):
     base = os.path.basename(name)
     if not base.endswith('.txt'):
@@ -319,6 +326,21 @@ def classify_train_error(text: str, prefix: str):
     return f'{prefix}_failed'
 
 
+def load_allocation_profile(path: Path):
+    rows = {}
+    if not path.exists():
+        return rows
+
+    with path.open('r', newline='') as f:
+        reader = csv.DictReader(f, delimiter='\t')
+        for row in reader:
+            case_name = normalize_case_name(str(row.get('case', '')).strip())
+            if not case_name:
+                continue
+            rows[case_name] = dict(row)
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--engine-config', default='data/engines/newton_engine.yaml')
@@ -345,6 +367,8 @@ def main():
     ap.add_argument('--viz-episodes', type=int, default=1)
     ap.add_argument('--nontrainable-num-envs', type=int, default=1)
     ap.add_argument('--nontrainable-max-samples', type=int, default=128)
+    ap.add_argument('--allocation-profile-tsv', default='')
+    ap.add_argument('--allocation-fallback', choices=['ladder', 'strict'], default='ladder')
     ap.add_argument('--root-out', default='')
     ap.add_argument('--resume-skip-status', choices=['ok', 'all', 'none'], default='ok')
     ap.add_argument('--require-deps', default='torch,newton,warp,scipy,trimesh,pyglet')
@@ -388,6 +412,17 @@ def main():
         root_name = f'case_ultralong_{ts}' if args.long_mode == 'time_budget' else f'case_longcycle_{ts}'
     root_out = ROOT / 'output' / 'train' / root_name
     root_out.mkdir(parents=True, exist_ok=True)
+
+    allocation_profile_path = None
+    allocation_profile_rows = {}
+    if args.allocation_profile_tsv.strip():
+        allocation_profile_path = Path(args.allocation_profile_tsv.strip())
+        if not allocation_profile_path.is_absolute():
+            allocation_profile_path = (ROOT / allocation_profile_path).resolve()
+        if not allocation_profile_path.exists():
+            print(f'[ERROR] allocation profile not found: {allocation_profile_path}')
+            return 2
+        allocation_profile_rows = load_allocation_profile(allocation_profile_path)
 
     manifest = []
     selected = []
@@ -466,6 +501,12 @@ def main():
         flush=True,
     )
     print(f'[INFO] resume_skip_status={args.resume_skip_status}', flush=True)
+    if allocation_profile_path is not None:
+        print(
+            f'[INFO] allocation_profile={allocation_profile_path} '
+            f'rows={len(allocation_profile_rows)} fallback={args.allocation_fallback}',
+            flush=True,
+        )
 
     existing_attempts = load_existing_attempts(root_out)
     if existing_attempts:
@@ -530,6 +571,11 @@ def main():
                 prev_final.setdefault('long_budget_reached', 0)
                 prev_final.setdefault('long_budget_signal', '')
                 prev_final.setdefault('long_stop_reason', '')
+                prev_final.setdefault('alloc_profile_used', 0)
+                prev_final.setdefault('alloc_variant', '')
+                prev_final.setdefault('alloc_num_envs', -1)
+                prev_final.setdefault('alloc_agent_config', '')
+                prev_final.setdefault('alloc_source', '')
                 results.append(prev_final)
 
                 print(f"\n[CASE {idx}/{len(selected)}] {case_name} ({case_type})", flush=True)
@@ -562,15 +608,81 @@ def main():
 
             variants = pick_agent_variants(case_name, base_agent)
             case_devices = train_devices
+            alloc_row = allocation_profile_rows.get(case_name, {})
+            has_alloc_row = bool(alloc_row)
+            alloc_status = str(alloc_row.get('status', '')).strip().lower() if alloc_row else ''
+            alloc_variant = str(alloc_row.get('variant', '')).strip() if alloc_row else ''
+            alloc_num_envs = parse_int_or(alloc_row.get('num_envs', ''), -1) if alloc_row else -1
+            alloc_agent_cfg = str(alloc_row.get('agent_config', '')).strip() if alloc_row else ''
+            if alloc_row and not alloc_agent_cfg:
+                alloc_agent_cfg = base_agent
+            profile_usable = bool(has_alloc_row and alloc_status == 'ok' and alloc_num_envs > 0 and alloc_agent_cfg)
         else:
             ladder = [max(1, int(args.nontrainable_num_envs))]
             variants = [('default', base_agent)]
             case_devices = nontrain_devices
+            alloc_row = {}
+            has_alloc_row = False
+            alloc_status = ''
+            alloc_variant = ''
+            alloc_num_envs = -1
+            alloc_agent_cfg = ''
+            profile_usable = False
+
+        attempt_plan = []
+        seen_attempts = set()
+
+        def add_attempt(variant_name, agent_cfg, num_envs, alloc_profile_used, alloc_source):
+            key = (variant_name, agent_cfg, int(num_envs))
+            if key in seen_attempts:
+                return
+            seen_attempts.add(key)
+            attempt_plan.append(
+                {
+                    'variant': variant_name,
+                    'agent_config': agent_cfg,
+                    'num_envs': int(num_envs),
+                    'alloc_profile_used': int(alloc_profile_used),
+                    'alloc_variant': variant_name if alloc_profile_used else '',
+                    'alloc_num_envs': int(num_envs) if alloc_profile_used else -1,
+                    'alloc_agent_config': agent_cfg if alloc_profile_used else '',
+                    'alloc_source': alloc_source,
+                }
+            )
+
+        if is_trainable and profile_usable:
+            selected_variant = alloc_variant or 'default'
+            add_attempt(selected_variant, alloc_agent_cfg, alloc_num_envs, 1, 'profile')
+            if args.allocation_fallback == 'ladder':
+                for variant_name, agent_cfg in variants:
+                    for num_envs in ladder:
+                        add_attempt(variant_name, agent_cfg, num_envs, 0, 'ladder_fallback')
+        elif is_trainable:
+            if has_alloc_row:
+                print(
+                    f"  [ALLOC] profile row unusable status={alloc_status or 'empty'} "
+                    f"num_envs={alloc_num_envs} agent={bool(alloc_agent_cfg)}",
+                    flush=True,
+                )
+            for variant_name, agent_cfg in variants:
+                for num_envs in ladder:
+                    add_attempt(variant_name, agent_cfg, num_envs, 0, 'auto')
+        else:
+            for variant_name, agent_cfg in variants:
+                for num_envs in ladder:
+                    add_attempt(variant_name, agent_cfg, num_envs, 0, 'nontrainable')
 
         print(f"\n[CASE {idx}/{len(selected)}] {case_name} ({case_type})", flush=True)
         print(f"  [LADDER] {ladder}", flush=True)
         print(f"  [AGENTS] {[x[0] for x in variants]}", flush=True)
         print(f"  [DEVICES] {case_devices}", flush=True)
+        if is_trainable and has_alloc_row:
+            print(
+                f"  [ALLOC] profile_found=1 usable={int(profile_usable)} "
+                f"variant={alloc_variant or '-'} num_envs={alloc_num_envs}",
+                flush=True,
+            )
+        print(f"  [ATTEMPTS] {len(attempt_plan)}", flush=True)
 
         final = None
         case_run_dir = root_out / 'runs' / case_name.replace('.txt', '')
@@ -581,122 +693,208 @@ def main():
         if all_attempts:
             print(f"  [RESUME] loaded {len(all_attempts)} prior attempts", flush=True)
 
-        for variant_name, agent_cfg in variants:
-            for num_envs in ladder:
-                attempt_start = time.time()
-                out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'{variant_name}_e{num_envs}'
-                out_dir.mkdir(parents=True, exist_ok=True)
+        for planned in attempt_plan:
+            variant_name = planned['variant']
+            agent_cfg = planned['agent_config']
+            num_envs = int(planned['num_envs'])
+            alloc_profile_used = int(planned.get('alloc_profile_used', 0))
+            alloc_variant_used = str(planned.get('alloc_variant', '') or '')
+            alloc_num_envs_used = int(planned.get('alloc_num_envs', -1))
+            alloc_agent_cfg_used = str(planned.get('alloc_agent_config', '') or '')
+            alloc_source = str(planned.get('alloc_source', '') or '')
 
-                probe_out = out_dir / 'probe_train'
-                long_out = out_dir / 'long_train'
-                probe_log = out_dir / 'probe_train.log'
-                long_log = out_dir / 'long_train.log'
-                test_log = out_dir / 'test.log'
-                viz_log = out_dir / 'viz.log'
+            if is_trainable and alloc_profile_used and args.allocation_fallback == 'strict':
+                print(f"  [ALLOC] strict profile mode active", flush=True)
 
-                if is_trainable:
-                    probe_samples = num_envs * len(case_devices) * 32 * args.probe_iters
-                else:
-                    probe_samples = max(1, int(args.nontrainable_max_samples))
+            attempt_start = time.time()
+            out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'{variant_name}_e{num_envs}'
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-                env = os.environ.copy()
-                env.update(NCCL_ENV)
-                env['PYTHONUNBUFFERED'] = '1'
+            probe_out = out_dir / 'probe_train'
+            long_out = out_dir / 'long_train'
+            probe_log = out_dir / 'probe_train.log'
+            long_log = out_dir / 'long_train.log'
+            test_log = out_dir / 'test.log'
+            viz_log = out_dir / 'viz.log'
 
-                attempt_idx = None
-                for i in range(len(all_attempts) - 1, -1, -1):
-                    a = all_attempts[i]
-                    if a.get('variant') == variant_name and int(a.get('num_envs', -1)) == num_envs:
-                        attempt_idx = i
-                        break
+            if is_trainable:
+                probe_samples = num_envs * len(case_devices) * 32 * args.probe_iters
+            else:
+                probe_samples = max(1, int(args.nontrainable_max_samples))
 
-                if attempt_idx is None:
-                    attempt = {
-                        'case': case_name,
-                        'method': case['method'],
-                        'case_type': case_type,
-                        'variant': variant_name,
-                        'agent_config': agent_cfg,
-                        'num_envs': num_envs,
-                        'probe_rc': -1,
-                        'probe_ok': 0,
-                        'probe_timeout': 0,
-                        'long_rc': -1,
-                        'long_ok': 0,
-                        'long_timeout': 0,
-                        'long_mode': (args.long_mode if is_trainable else 'bootstrap'),
-                        'long_max_samples': int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0),
-                        'long_budget_hours': float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0),
-                        'long_budget_target_sec': int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0),
-                        'long_budget_elapsed_sec': 0.0,
-                        'long_budget_reached': 0,
-                        'long_budget_signal': (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else ''),
-                        'long_stop_reason': '',
-                        'test_rc': -1,
-                        'test_ok': 0,
-                        'viz_rc': -1,
-                        'viz_ok': 0,
-                        'probe_elapsed_sec': 0.0,
-                        'long_elapsed_sec': 0.0,
-                        'test_elapsed_sec': 0.0,
-                        'viz_elapsed_sec': 0.0,
-                        'stage_elapsed_sec': 0.0,
-                        'final_ok': 0,
-                        'note': 'in_progress_probe',
-                        'out_dir': str(out_dir),
-                        'probe_out_dir': str(probe_out),
-                        'long_out_dir': str(long_out if is_trainable else ''),
-                        'probe_train_log': str(probe_log),
-                        'long_train_log': str(long_log),
-                        'test_log': str(test_log),
-                        'viz_log': str(viz_log),
-                    }
-                    all_attempts.append(attempt)
-                    attempt_idx = len(all_attempts) - 1
-                else:
-                    attempt = dict(all_attempts[attempt_idx])
+            env = os.environ.copy()
+            env.update(NCCL_ENV)
+            env['PYTHONUNBUFFERED'] = '1'
 
-                attempt['case'] = case_name
-                attempt['method'] = case['method']
-                attempt['case_type'] = case_type
-                attempt['variant'] = variant_name
-                attempt['agent_config'] = agent_cfg
-                attempt['num_envs'] = num_envs
-                attempt['long_mode'] = (args.long_mode if is_trainable else 'bootstrap')
-                attempt['long_max_samples'] = int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0)
-                attempt['long_budget_hours'] = float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0)
-                attempt['long_budget_target_sec'] = int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0)
-                if is_trainable and args.long_mode == 'time_budget':
-                    attempt['long_budget_elapsed_sec'] = float(attempt.get('long_budget_elapsed_sec', 0.0) or 0.0)
-                    attempt['long_budget_reached'] = int(attempt.get('long_budget_reached', 0) or 0)
-                else:
-                    attempt['long_budget_elapsed_sec'] = 0.0
-                    attempt['long_budget_reached'] = 0
-                attempt['long_budget_signal'] = (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else '')
-                attempt['long_stop_reason'] = str(attempt.get('long_stop_reason', '') or '')
-                attempt['out_dir'] = str(out_dir)
-                attempt['probe_out_dir'] = str(probe_out)
-                attempt['long_out_dir'] = str(long_out if is_trainable else '')
-                attempt['probe_train_log'] = str(probe_log)
-                attempt['long_train_log'] = str(long_log)
-                attempt['test_log'] = str(test_log)
-                attempt['viz_log'] = str(viz_log)
+            attempt_idx = None
+            for i in range(len(all_attempts) - 1, -1, -1):
+                a = all_attempts[i]
+                if (
+                    a.get('variant') == variant_name
+                    and int(a.get('num_envs', -1)) == num_envs
+                    and str(a.get('agent_config', '')) == str(agent_cfg)
+                ):
+                    attempt_idx = i
+                    break
 
-                prev_stage_elapsed = float(attempt.get('stage_elapsed_sec', 0.0) or 0.0)
+            if attempt_idx is None:
+                attempt = {
+                    'case': case_name,
+                    'method': case['method'],
+                    'case_type': case_type,
+                    'variant': variant_name,
+                    'agent_config': agent_cfg,
+                    'num_envs': num_envs,
+                    'probe_rc': -1,
+                    'probe_ok': 0,
+                    'probe_timeout': 0,
+                    'long_rc': -1,
+                    'long_ok': 0,
+                    'long_timeout': 0,
+                    'long_mode': (args.long_mode if is_trainable else 'bootstrap'),
+                    'long_max_samples': int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0),
+                    'long_budget_hours': float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0),
+                    'long_budget_target_sec': int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0),
+                    'long_budget_elapsed_sec': 0.0,
+                    'long_budget_reached': 0,
+                    'long_budget_signal': (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else ''),
+                    'long_stop_reason': '',
+                    'alloc_profile_used': int(alloc_profile_used),
+                    'alloc_variant': alloc_variant_used,
+                    'alloc_num_envs': int(alloc_num_envs_used),
+                    'alloc_agent_config': alloc_agent_cfg_used,
+                    'alloc_source': alloc_source,
+                    'test_rc': -1,
+                    'test_ok': 0,
+                    'viz_rc': -1,
+                    'viz_ok': 0,
+                    'probe_elapsed_sec': 0.0,
+                    'long_elapsed_sec': 0.0,
+                    'test_elapsed_sec': 0.0,
+                    'viz_elapsed_sec': 0.0,
+                    'stage_elapsed_sec': 0.0,
+                    'final_ok': 0,
+                    'note': 'in_progress_probe',
+                    'out_dir': str(out_dir),
+                    'probe_out_dir': str(probe_out),
+                    'long_out_dir': str(long_out if is_trainable else ''),
+                    'probe_train_log': str(probe_log),
+                    'long_train_log': str(long_log),
+                    'test_log': str(test_log),
+                    'viz_log': str(viz_log),
+                }
+                all_attempts.append(attempt)
+                attempt_idx = len(all_attempts) - 1
+            else:
+                attempt = dict(all_attempts[attempt_idx])
+
+            attempt['case'] = case_name
+            attempt['method'] = case['method']
+            attempt['case_type'] = case_type
+            attempt['variant'] = variant_name
+            attempt['agent_config'] = agent_cfg
+            attempt['num_envs'] = num_envs
+            attempt['long_mode'] = (args.long_mode if is_trainable else 'bootstrap')
+            attempt['long_max_samples'] = int(args.long_max_samples if (is_trainable and args.long_mode == 'max_samples') else 0)
+            attempt['long_budget_hours'] = float(args.long_budget_hours if (is_trainable and args.long_mode == 'time_budget') else 0.0)
+            attempt['long_budget_target_sec'] = int(long_budget_target_sec if (is_trainable and args.long_mode == 'time_budget') else 0)
+            if is_trainable and args.long_mode == 'time_budget':
+                attempt['long_budget_elapsed_sec'] = float(attempt.get('long_budget_elapsed_sec', 0.0) or 0.0)
+                attempt['long_budget_reached'] = int(attempt.get('long_budget_reached', 0) or 0)
+            else:
+                attempt['long_budget_elapsed_sec'] = 0.0
+                attempt['long_budget_reached'] = 0
+            attempt['long_budget_signal'] = (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else '')
+            attempt['long_stop_reason'] = str(attempt.get('long_stop_reason', '') or '')
+            attempt['alloc_profile_used'] = int(alloc_profile_used)
+            attempt['alloc_variant'] = alloc_variant_used
+            attempt['alloc_num_envs'] = int(alloc_num_envs_used)
+            attempt['alloc_agent_config'] = alloc_agent_cfg_used
+            attempt['alloc_source'] = alloc_source
+            attempt['out_dir'] = str(out_dir)
+            attempt['probe_out_dir'] = str(probe_out)
+            attempt['long_out_dir'] = str(long_out if is_trainable else '')
+            attempt['probe_train_log'] = str(probe_log)
+            attempt['long_train_log'] = str(long_log)
+            attempt['test_log'] = str(test_log)
+            attempt['viz_log'] = str(viz_log)
+
+            prev_stage_elapsed = float(attempt.get('stage_elapsed_sec', 0.0) or 0.0)
+            all_attempts[attempt_idx] = attempt
+            save_case_attempts(case_run_dir, all_attempts)
+
+            probe_ready = (
+                int(attempt.get('probe_ok', 0)) == 1
+                and (probe_out / 'model.pt').exists()
+                and (probe_out / 'log.txt').exists()
+            )
+            if not probe_ready:
+                attempt['note'] = 'in_progress_probe'
                 all_attempts[attempt_idx] = attempt
                 save_case_attempts(case_run_dir, all_attempts)
 
-                probe_ready = (
-                    int(attempt.get('probe_ok', 0)) == 1
+                probe_cmd = [
+                    str(TRAIN_PY), str(RUN_PY),
+                    '--arg_file', arg_rel,
+                    '--engine_config', args.engine_config,
+                    '--mode', 'train',
+                    '--visualize', 'false',
+                    '--devices', *case_devices,
+                    '--num_envs', str(num_envs),
+                    '--max_samples', str(probe_samples),
+                    '--out_dir', str(probe_out),
+                    '--master_port', str(random.randint(20000, 45000)),
+                ]
+                if agent_cfg:
+                    probe_cmd.extend(['--agent_config', agent_cfg])
+
+                probe_rc, probe_to, probe_text, probe_elapsed = run_cmd(
+                    probe_cmd,
+                    env,
+                    ROOT,
+                    probe_log,
+                    args.probe_timeout,
+                )
+                probe_ok = (
+                    probe_rc == 0
                     and (probe_out / 'model.pt').exists()
                     and (probe_out / 'log.txt').exists()
                 )
-                if not probe_ready:
-                    attempt['note'] = 'in_progress_probe'
+
+                attempt['probe_rc'] = probe_rc
+                attempt['probe_ok'] = int(probe_ok)
+                attempt['probe_timeout'] = int(probe_to)
+                attempt['probe_elapsed_sec'] = round(float(attempt.get('probe_elapsed_sec', 0.0) or 0.0) + probe_elapsed, 2)
+
+                if not probe_ok:
+                    note = classify_train_error(probe_text, 'probe')
+                    if probe_rc == 124 or probe_to:
+                        note = 'probe_timeout'
+                    attempt['note'] = note
+                    attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                    all_attempts[attempt_idx] = attempt
+                    save_case_attempts(case_run_dir, all_attempts)
+                    print(f"  [TRY {variant_name} e{num_envs}] {note}", flush=True)
+                    continue
+            else:
+                print(f"  [TRY {variant_name} e{num_envs}] resume: skip probe", flush=True)
+
+            if is_trainable:
+                long_ready = (
+                    int(attempt.get('long_ok', 0)) == 1
+                    and (long_out / 'model.pt').exists()
+                    and (long_out / 'log.txt').exists()
+                )
+                if not long_ready:
+                    attempt['note'] = 'in_progress_long'
                     all_attempts[attempt_idx] = attempt
                     save_case_attempts(case_run_dir, all_attempts)
 
-                    probe_cmd = [
+                    long_model_file = long_out / 'model.pt'
+                    if not long_model_file.exists():
+                        long_model_file = probe_out / 'model.pt'
+
+                    long_cmd = [
                         str(TRAIN_PY), str(RUN_PY),
                         '--arg_file', arg_rel,
                         '--engine_config', args.engine_config,
@@ -704,162 +902,101 @@ def main():
                         '--visualize', 'false',
                         '--devices', *case_devices,
                         '--num_envs', str(num_envs),
-                        '--max_samples', str(probe_samples),
-                        '--out_dir', str(probe_out),
+                        '--out_dir', str(long_out),
+                        '--model_file', str(long_model_file),
                         '--master_port', str(random.randint(20000, 45000)),
                     ]
+                    if args.long_mode == 'max_samples':
+                        long_cmd.extend(['--max_samples', str(args.long_max_samples)])
                     if agent_cfg:
-                        probe_cmd.extend(['--agent_config', agent_cfg])
+                        long_cmd.extend(['--agent_config', agent_cfg])
 
-                    probe_rc, probe_to, probe_text, probe_elapsed = run_cmd(
-                        probe_cmd,
-                        env,
-                        ROOT,
-                        probe_log,
-                        args.probe_timeout,
-                    )
-                    probe_ok = (
-                        probe_rc == 0
-                        and (probe_out / 'model.pt').exists()
-                        and (probe_out / 'log.txt').exists()
-                    )
+                    long_stop_reason = ''
+                    if args.long_mode == 'max_samples':
+                        long_rc, long_to, long_text, long_elapsed = run_cmd(
+                            long_cmd,
+                            env,
+                            ROOT,
+                            long_log,
+                            args.long_timeout,
+                        )
+                        long_ok = (
+                            long_rc == 0
+                            and (long_out / 'model.pt').exists()
+                            and (long_out / 'log.txt').exists()
+                        )
+                        long_stop_reason = f'long_exit_rc_{long_rc}'
+                    else:
+                        prev_budget_elapsed = float(attempt.get('long_budget_elapsed_sec', 0.0) or 0.0)
+                        target_budget_sec = float(attempt.get('long_budget_target_sec', 0.0) or 0.0)
+                        remaining_budget_sec = max(0.0, target_budget_sec - prev_budget_elapsed)
 
-                    attempt['probe_rc'] = probe_rc
-                    attempt['probe_ok'] = int(probe_ok)
-                    attempt['probe_timeout'] = int(probe_to)
-                    attempt['probe_elapsed_sec'] = round(float(attempt.get('probe_elapsed_sec', 0.0) or 0.0) + probe_elapsed, 2)
+                        long_to = False
+                        long_rc = 0
+                        long_text = ''
+                        long_elapsed = 0.0
+                        reached_budget = False
 
-                    if not probe_ok:
-                        note = classify_train_error(probe_text, 'probe')
-                        if probe_rc == 124 or probe_to:
-                            note = 'probe_timeout'
-                        attempt['note'] = note
-                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
-                        all_attempts[attempt_idx] = attempt
-                        save_case_attempts(case_run_dir, all_attempts)
-                        print(f"  [TRY {variant_name} e{num_envs}] {note}", flush=True)
-                        continue
-                else:
-                    print(f"  [TRY {variant_name} e{num_envs}] resume: skip probe", flush=True)
-
-                if is_trainable:
-                    long_ready = (
-                        int(attempt.get('long_ok', 0)) == 1
-                        and (long_out / 'model.pt').exists()
-                        and (long_out / 'log.txt').exists()
-                    )
-                    if not long_ready:
-                        attempt['note'] = 'in_progress_long'
-                        all_attempts[attempt_idx] = attempt
-                        save_case_attempts(case_run_dir, all_attempts)
-
-                        long_model_file = long_out / 'model.pt'
-                        if not long_model_file.exists():
-                            long_model_file = probe_out / 'model.pt'
-
-                        long_cmd = [
-                            str(TRAIN_PY), str(RUN_PY),
-                            '--arg_file', arg_rel,
-                            '--engine_config', args.engine_config,
-                            '--mode', 'train',
-                            '--visualize', 'false',
-                            '--devices', *case_devices,
-                            '--num_envs', str(num_envs),
-                            '--out_dir', str(long_out),
-                            '--model_file', str(long_model_file),
-                            '--master_port', str(random.randint(20000, 45000)),
-                        ]
-                        if args.long_mode == 'max_samples':
-                            long_cmd.extend(['--max_samples', str(args.long_max_samples)])
-                        if agent_cfg:
-                            long_cmd.extend(['--agent_config', agent_cfg])
-
-                        long_stop_reason = ''
-                        if args.long_mode == 'max_samples':
-                            long_rc, long_to, long_text, long_elapsed = run_cmd(
+                        if remaining_budget_sec > 0:
+                            long_rc, reached_budget, long_stop_reason, long_text, long_elapsed = run_cmd_time_budget(
                                 long_cmd,
                                 env,
                                 ROOT,
                                 long_log,
-                                args.long_timeout,
+                                remaining_budget_sec,
+                                long_budget_signal,
+                                args.long_budget_grace_sec,
                             )
-                            long_ok = (
-                                long_rc == 0
-                                and (long_out / 'model.pt').exists()
-                                and (long_out / 'log.txt').exists()
-                            )
-                            long_stop_reason = f'long_exit_rc_{long_rc}'
                         else:
-                            prev_budget_elapsed = float(attempt.get('long_budget_elapsed_sec', 0.0) or 0.0)
-                            target_budget_sec = float(attempt.get('long_budget_target_sec', 0.0) or 0.0)
-                            remaining_budget_sec = max(0.0, target_budget_sec - prev_budget_elapsed)
+                            long_stop_reason = 'long_budget_already_reached'
+                            reached_budget = bool(int(attempt.get('long_budget_reached', 0)))
 
-                            long_to = False
-                            long_rc = 0
-                            long_text = ''
-                            long_elapsed = 0.0
-                            reached_budget = False
+                        budget_elapsed = prev_budget_elapsed + float(long_elapsed)
+                        attempt['long_budget_elapsed_sec'] = round(budget_elapsed, 2)
+                        if reached_budget or budget_elapsed >= max(0.0, target_budget_sec - 1e-6):
+                            attempt['long_budget_reached'] = 1
 
-                            if remaining_budget_sec > 0:
-                                long_rc, reached_budget, long_stop_reason, long_text, long_elapsed = run_cmd_time_budget(
-                                    long_cmd,
-                                    env,
-                                    ROOT,
-                                    long_log,
-                                    remaining_budget_sec,
-                                    long_budget_signal,
-                                    args.long_budget_grace_sec,
-                                )
-                            else:
-                                long_stop_reason = 'long_budget_already_reached'
-                                reached_budget = bool(int(attempt.get('long_budget_reached', 0)))
+                        long_train_text = (long_out / 'log.txt').read_text(errors='ignore') if (long_out / 'log.txt').exists() else ''
+                        checkpoint_ok = (
+                            (long_out / 'model.pt').exists()
+                            and (long_out / 'log.txt').exists()
+                            and has_train_iter_row(long_train_text)
+                        )
+                        budget_reached_now = bool(int(attempt.get('long_budget_reached', 0)))
+                        fatal_marker = has_fatal_train_marker(long_text, include_nccl=(not budget_reached_now))
 
-                            budget_elapsed = prev_budget_elapsed + float(long_elapsed)
-                            attempt['long_budget_elapsed_sec'] = round(budget_elapsed, 2)
-                            if reached_budget or budget_elapsed >= max(0.0, target_budget_sec - 1e-6):
-                                attempt['long_budget_reached'] = 1
+                        if args.long_success_policy == 'strict_exit':
+                            long_ok = (long_rc == 0 and checkpoint_ok and (not fatal_marker))
+                        else:
+                            long_ok = (int(attempt.get('long_budget_reached', 0)) == 1 and checkpoint_ok and (not fatal_marker))
 
-                            long_train_text = (long_out / 'log.txt').read_text(errors='ignore') if (long_out / 'log.txt').exists() else ''
-                            checkpoint_ok = (
-                                (long_out / 'model.pt').exists()
-                                and (long_out / 'log.txt').exists()
-                                and has_train_iter_row(long_train_text)
-                            )
+                    attempt['long_rc'] = long_rc
+                    attempt['long_ok'] = int(long_ok)
+                    attempt['long_timeout'] = int(long_to)
+                    attempt['long_elapsed_sec'] = round(float(attempt.get('long_elapsed_sec', 0.0) or 0.0) + long_elapsed, 2)
+                    attempt['long_stop_reason'] = long_stop_reason
+
+                    if not long_ok:
+                        note = classify_train_error(long_text, 'long')
+                        if args.long_mode == 'max_samples':
+                            if long_rc == 124 or long_to:
+                                note = 'long_timeout'
+                        else:
                             budget_reached_now = bool(int(attempt.get('long_budget_reached', 0)))
-                            fatal_marker = has_fatal_train_marker(long_text, include_nccl=(not budget_reached_now))
-
-                            if args.long_success_policy == 'strict_exit':
-                                long_ok = (long_rc == 0 and checkpoint_ok and (not fatal_marker))
+                            if has_fatal_train_marker(long_text, include_nccl=(not budget_reached_now)):
+                                note = classify_train_error(long_text, 'long')
+                            elif int(attempt.get('long_budget_reached', 0)) == 1:
+                                note = 'long_budget_invalid'
+                            elif long_rc != 0:
+                                note = 'long_failed'
                             else:
-                                long_ok = (int(attempt.get('long_budget_reached', 0)) == 1 and checkpoint_ok and (not fatal_marker))
-
-                        attempt['long_rc'] = long_rc
-                        attempt['long_ok'] = int(long_ok)
-                        attempt['long_timeout'] = int(long_to)
-                        attempt['long_elapsed_sec'] = round(float(attempt.get('long_elapsed_sec', 0.0) or 0.0) + long_elapsed, 2)
-                        attempt['long_stop_reason'] = long_stop_reason
-
-                        if not long_ok:
-                            note = classify_train_error(long_text, 'long')
-                            if args.long_mode == 'max_samples':
-                                if long_rc == 124 or long_to:
-                                    note = 'long_timeout'
-                            else:
-                                budget_reached_now = bool(int(attempt.get('long_budget_reached', 0)))
-                                if has_fatal_train_marker(long_text, include_nccl=(not budget_reached_now)):
-                                    note = classify_train_error(long_text, 'long')
-                                elif int(attempt.get('long_budget_reached', 0)) == 1:
-                                    note = 'long_budget_invalid'
-                                elif long_rc != 0:
-                                    note = 'long_failed'
-                                else:
-                                    note = 'long_budget_incomplete'
-                            attempt['note'] = note
-                            attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
-                            all_attempts[attempt_idx] = attempt
-                            save_case_attempts(case_run_dir, all_attempts)
-                            print(f"  [TRY {variant_name} e{num_envs}] probe=ok {note}", flush=True)
-                            continue
+                                note = 'long_budget_incomplete'
+                        attempt['note'] = note
+                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                        all_attempts[attempt_idx] = attempt
+                        save_case_attempts(case_run_dir, all_attempts)
+                        print(f"  [TRY {variant_name} e{num_envs}] probe=ok {note}", flush=True)
+                        continue
                     else:
                         print(f"  [TRY {variant_name} e{num_envs}] resume: skip long", flush=True)
 
@@ -1004,6 +1141,11 @@ def main():
                     'long_budget_reached': 0,
                     'long_budget_signal': (args.long_budget_signal if (is_trainable and args.long_mode == 'time_budget') else ''),
                     'long_stop_reason': '',
+                    'alloc_profile_used': 0,
+                    'alloc_variant': '',
+                    'alloc_num_envs': -1,
+                    'alloc_agent_config': '',
+                    'alloc_source': '',
                     'test_rc': -1,
                     'test_ok': 0,
                     'viz_rc': -1,
@@ -1045,6 +1187,7 @@ def main():
         'long_rc', 'long_ok', 'long_timeout', 'long_mode', 'long_max_samples',
         'long_budget_hours', 'long_budget_target_sec', 'long_budget_elapsed_sec',
         'long_budget_reached', 'long_budget_signal', 'long_stop_reason',
+        'alloc_profile_used', 'alloc_variant', 'alloc_num_envs', 'alloc_agent_config', 'alloc_source',
         'test_rc', 'test_ok',
         'viz_rc', 'viz_ok',
         'probe_elapsed_sec', 'long_elapsed_sec', 'test_elapsed_sec', 'viz_elapsed_sec', 'stage_elapsed_sec',

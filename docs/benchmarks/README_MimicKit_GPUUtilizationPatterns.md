@@ -113,3 +113,92 @@
 3. util 不高不一定是坏事：很多 `add/deepmimic` 案例吞吐仍然高，瓶颈在环境/同步而非显存。
 4. 调参顺序建议：
    `先保稳定(不过OOM/NCCL) -> 再抬util -> 最后看样本吞吐与回报`。
+
+## 为什么每个案例会不一样（根因拆解）
+
+下面是本仓库里导致“同机不同案例表现差异大”的主要原因：
+
+1. 环境计算负载不同（仿真侧差异）
+- 不同任务/机器人带来的接触、约束、状态维度不同，导致每步仿真成本不同。
+- 同样 `num_envs` 下，有的 case 更偏仿真吞吐，有的更偏训练更新计算。
+
+2. 算法结构不同（学习侧差异）
+- `deepmimic/ppo` 主要是 actor-critic 更新。
+- `amp/add/ase` 还包含 discriminator（`disc_*`）相关开销。
+- `ase` 额外有 encoder/latent（`enc_net`, `latent_dim`），计算更重，常见更高 util。
+
+3. agent 配置强度不同（同方法也会差很多）
+- 默认配置通常：`fc_2layers_1024units + update_epochs=5 + batch_size=4`。
+- hiutil 配置通常：`fc_3layers_1024units + update_epochs=20/40 + batch_size=2`。
+- 这会直接改变每轮反向传播负载，导致 util 曲线显著变化。
+
+4. 显存占用结构不同（buffer 与 obs/action 形状）
+- `steps_per_iter=32` 固定，但 obs/action 维度、方法额外缓存（如 disc buffer）不同。
+- `pi_plus` 在本机表现为典型高显存场景（稳定档位也接近 24GB）。
+- 高显存并不保证高 util，可能是“内存压满但算力没满”。
+
+5. 多卡同步与通信占比不同
+- 双卡下每轮都有同步成本，轻量计算任务更容易被通信开销“稀释” util。
+- 这也是部分 `add/deepmimic` case util 中低而吞吐仍可接受的原因之一。
+
+6. 训练阶段不同会改变观测
+- `probe`、`long`、`test/viz` 的 util 与显存特征完全不同，不能混在一起判断。
+- 长周期里建议只用 long 阶段统计做瓶颈判断。
+
+## 如何更高效利用机器（实操手册）
+
+先明确目标，再调参：
+
+1. 目标 A：最大化“整机样本产出/天”
+2. 目标 B：尽量抬高单任务 GPU 利用率
+3. 目标 C：稳定优先（长周期不中断）
+
+### 快速决策表
+
+| 观测症状（按 long 阶段） | 判定 | 优先动作 |
+|---|---|---|
+| 显存 `>23GB` 且 util `45-55%` | VRAM 受限（pi_plus 常见） | 保持稳定档位，避免继续加 `num_envs`；优先保证不中断 |
+| 显存 `<8GB` 且 util `<45%` | 吞吐/环境主导 | 若目标是整机吞吐，考虑两张卡分开跑两个单卡任务 |
+| util `>60%` 且显存中等 | 计算主导 | 该配置已接近“高利用率区”，优先保持稳定运行 |
+| util 波动大、平均不高但 samples/s 高 | 通信/阶段性波动 | 以 samples/s 与训练回报为主，不只盯 util |
+| 频繁 OOM/NCCL | 稳定性不足 | 先降 `num_envs` 档位，再谈利用率 |
+
+### 参数调优顺序（推荐固定流程）
+
+1. 先稳定：
+- 用已验证 ladder（默认与 pi_plus 专用 ladder）。
+- 出现 OOM/NCCL 先降档，不要直接加重模型。
+
+2. 再抬利用率：
+- 对非 pi_plus：可以尝试 hiutil agent（更深网络、更高 `update_epochs`、更小 `batch_size`）。
+- 对 pi_plus：先守住稳定显存档位（`add/deepmimic e40`, `amp e38`），再小步试探。
+
+3. 最后看整机效率：
+- 如果长期 `util<45%` 且显存明显没吃满，优先考虑“单卡并行双任务”而不是继续强行堆同一任务。
+- 如果已经显存接近满载，不要盲目并行，优先保证主任务连续性。
+
+### 针对本机（双 4090）可直接执行的策略
+
+1. `pi_plus` 三例：
+- 维持当前稳定档位：
+  - `add_pi_plus`: `hiutil e40`
+  - `amp_pi_plus`: `hiutil e38`
+  - `deepmimic_pi_plus`: `hiutil e40`
+- 目标优先级：稳定 > 利用率。
+
+2. `ase/amp_smpl`：
+- 这些 case 本身已偏高 util，继续双卡长训收益稳定。
+
+3. `add_go2/deepmimic_go2/vault_g1` 这类低 util case：
+- 若你的目标是“整机吞吐最大化”，可把一条双卡任务拆成两条单卡任务并行跑不同 case。
+- 若目标是“单案例最快收敛”，保留双卡但不要只用 util 评估好坏。
+
+## 监控口径建议（避免误判）
+
+1. 统一用 long 阶段统计，不混 probe/test/viz。
+2. 同时看三项：
+- `min_avg_util` 或窗口平均 util
+- `max_mem0/max_mem1`
+- `samples_per_s`（吞吐）
+3. 当三者冲突时，优先级建议：
+- 长周期稳定性 > 吞吐 > util 表象。

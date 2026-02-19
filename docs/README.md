@@ -62,6 +62,7 @@
 - `docs/skill/mimickit-allcase-longcycle-skill/SKILL.md`
 - `docs/skill/mimickit-framework-usage-from-git-history/SKILL.md`
 - `docs/skill/mimickit-multicase-gpu-util-skill/SKILL.md`
+- `docs/skill/mimickit-gpu-efficiency-optimization-skill/SKILL.md`
 - `docs/skill/mimickit-piplus-dualgpu-training-skill/SKILL.md`
 - `docs/skill/mimickit-wsl-multi-backend-setup-skill/SKILL.md`
 - `docs/skill/mimickit-wsl-newton-setup-skill/SKILL.md`

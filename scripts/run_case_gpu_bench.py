@@ -25,6 +25,8 @@ ENGINE_NEWTON = os.environ.get('MIMICKIT_ENGINE_CONFIG', 'data/engines/newton_en
 DEVICES = 'cuda:0 cuda:1'
 ENV_LADDER = [1024, 512, 256]
 PI_PLUS_ENV_LADDER = [1024, 768, 512, 384, 256, 192, 128, 96, 64, 48, 44, 40, 39, 38, 36, 32]
+AMP_PI_PLUS_ENV_LADDER = [40, 39, 38, 36, 32, 24, 16, 8, 4, 2, 1]
+AMP_PI_PLUS_CASE = 'amp_pi_plus_args.txt'
 MAX_SECONDS = 420
 ITER_TARGET = 8
 
@@ -329,6 +331,62 @@ def run_one(case_name, arg_rel, agent_rel, variant, num_envs, out_dir):
     }
 
 
+def to_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def choose_case_ladder(case_name: str, default_ladder, pi_plus_ladder, amp_pi_plus_ladder):
+    if case_name == AMP_PI_PLUS_CASE:
+        return list(amp_pi_plus_ladder)
+    if 'pi_plus' in case_name:
+        return list(pi_plus_ladder)
+    return list(default_ladder)
+
+
+def select_case_result(case_runs, objective: str, util_floor: float):
+    if not case_runs:
+        return {'case': '', 'status': 'unrun'}, 'no_runs', 0.0
+
+    ok_runs = [x for x in case_runs if x.get('status') == 'ok']
+    if not ok_runs:
+        selected = max(
+            case_runs,
+            key=lambda x: (to_float(x.get('min_avg_util', -1.0), -1.0), to_float(x.get('samples_per_s', -1.0), -1.0)),
+        )
+        return selected, 'no_ok_pick_highest_util_from_all', to_float(selected.get('min_avg_util', 0.0), 0.0)
+
+    if objective == 'util':
+        selected = max(
+            ok_runs,
+            key=lambda x: (to_float(x.get('min_avg_util', 0.0), 0.0), to_float(x.get('samples_per_s', 0.0), 0.0)),
+        )
+        return selected, 'util_max_min_avg_util', to_float(selected.get('min_avg_util', 0.0), 0.0)
+
+    if objective == 'sps':
+        selected = max(
+            ok_runs,
+            key=lambda x: (to_float(x.get('samples_per_s', 0.0), 0.0), to_float(x.get('min_avg_util', 0.0), 0.0)),
+        )
+        return selected, 'sps_max_samples_per_s', to_float(selected.get('samples_per_s', 0.0), 0.0)
+
+    floor_ok = [x for x in ok_runs if to_float(x.get('min_avg_util', 0.0), 0.0) >= util_floor]
+    if floor_ok:
+        selected = max(
+            floor_ok,
+            key=lambda x: (to_float(x.get('samples_per_s', 0.0), 0.0), to_float(x.get('min_avg_util', 0.0), 0.0)),
+        )
+        return selected, f'balanced_util_floor_{util_floor:g}_then_max_sps', to_float(selected.get('samples_per_s', 0.0), 0.0)
+
+    selected = max(
+        ok_runs,
+        key=lambda x: (to_float(x.get('min_avg_util', 0.0), 0.0), to_float(x.get('samples_per_s', 0.0), 0.0)),
+    )
+    return selected, f'balanced_no_floor_hit_{util_floor:g}_fallback_max_util', to_float(selected.get('min_avg_util', 0.0), 0.0)
+
+
 def main():
     global MAX_SECONDS, ITER_TARGET, ENGINE_NEWTON
 
@@ -336,6 +394,10 @@ def main():
     ap.add_argument('--cases', default='', help='comma-separated case names (e.g. amp_humanoid_args.txt,deepmimic_pi_plus_ppo_args.txt)')
     ap.add_argument('--env-ladder', default=','.join(str(x) for x in ENV_LADDER), help='default per-GPU env ladder')
     ap.add_argument('--pi-plus-ladder', default=','.join(str(x) for x in PI_PLUS_ENV_LADDER), help='per-GPU env ladder for pi_plus cases')
+    ap.add_argument('--amp-pi-plus-ladder', default=','.join(str(x) for x in AMP_PI_PLUS_ENV_LADDER), help='per-GPU env ladder for amp_pi_plus case')
+    ap.add_argument('--objective', choices=['balanced', 'util', 'sps'], default='balanced', help='selection objective for final case allocation')
+    ap.add_argument('--util-floor', type=float, default=50.0, help='minimum min_avg_util for balanced objective')
+    ap.add_argument('--scan-policy', choices=['first_ok', 'full_scan'], default='full_scan', help='probe stop policy per case')
     ap.add_argument('--max-seconds', type=int, default=MAX_SECONDS, help='max runtime per probe')
     ap.add_argument('--iter-target', type=int, default=ITER_TARGET, help='target iterations for bounded probe')
     ap.add_argument('--engine-config', default=ENGINE_NEWTON, help='engine config path')
@@ -350,10 +412,13 @@ def main():
     case_filter = {normalize_case_name(x) for x in parse_csv_names(args.cases)} if args.cases.strip() else set()
     default_ladder = parse_int_ladder(args.env_ladder)
     pi_plus_ladder = parse_int_ladder(args.pi_plus_ladder)
+    amp_pi_plus_ladder = parse_int_ladder(args.amp_pi_plus_ladder)
     if not default_ladder:
         default_ladder = list(ENV_LADDER)
     if not pi_plus_ladder:
         pi_plus_ladder = list(PI_PLUS_ENV_LADDER)
+    if not amp_pi_plus_ladder:
+        amp_pi_plus_ladder = list(AMP_PI_PLUS_ENV_LADDER)
 
     required_deps = parse_csv_names(args.require_deps)
     if required_deps:
@@ -377,10 +442,10 @@ def main():
     for p in sorted(glob.glob(str(ROOT / 'args' / '*.txt'))):
         rel = os.path.relpath(p, ROOT)
         name = os.path.basename(p)
-        args = parse_arg_file(Path(p))
-        mode = args.get('mode', 'train')
-        agent = args.get('agent_config', '')
-        env = args.get('env_config', '')
+        case_cfg = parse_arg_file(Path(p))
+        mode = case_cfg.get('mode', 'train')
+        agent = case_cfg.get('agent_config', '')
+        env = case_cfg.get('env_config', '')
         method = name.split('_')[0]
         row = {
             'case': name,
@@ -388,7 +453,7 @@ def main():
             'mode': mode,
             'agent_config': agent,
             'env_config': env,
-            'engine_config': args.get('engine_config', ''),
+            'engine_config': case_cfg.get('engine_config', ''),
         }
         manifest_rows.append(row)
         if mode == 'train' and agent:
@@ -405,7 +470,16 @@ def main():
     results = []
     print(f"[INFO] total_cases={len(manifest_rows)} trainable_cases={len(train_cases)}", flush=True)
     print(f"[INFO] root_out={root_out}", flush=True)
-    print(f"[INFO] default_env_ladder={default_ladder} pi_plus_env_ladder={pi_plus_ladder}", flush=True)
+    print(
+        f"[INFO] default_env_ladder={default_ladder} "
+        f"pi_plus_env_ladder={pi_plus_ladder} "
+        f"amp_pi_plus_env_ladder={amp_pi_plus_ladder}",
+        flush=True,
+    )
+    print(
+        f"[INFO] objective={args.objective} util_floor={args.util_floor:g} scan_policy={args.scan_policy}",
+        flush=True,
+    )
     print(f"[INFO] max_seconds={MAX_SECONDS} iter_target={ITER_TARGET} engine_config={ENGINE_NEWTON}", flush=True)
     if case_filter:
         print(f"[INFO] case_filter={sorted(case_filter)}", flush=True)
@@ -414,7 +488,7 @@ def main():
         case_name = case['case']
         arg_rel = f"args/{case_name}"
         base_agent = case['agent_config']
-        case_ladder = pi_plus_ladder if 'pi_plus' in case_name else default_ladder
+        case_ladder = choose_case_ladder(case_name, default_ladder, pi_plus_ladder, amp_pi_plus_ladder)
 
         print(f"\\n[CASE {idx}/{len(train_cases)}] {case_name}", flush=True)
         print(f"  [LADDER] {case_ladder}", flush=True)
@@ -428,35 +502,32 @@ def main():
             hi_rel = base_agent
 
         case_runs = []
-        selected = None
-
+        run_plan = []
         for num_envs in case_ladder:
-            out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'hiutil_e{num_envs}'
-            res = run_one(case_name, arg_rel, hi_rel, 'hiutil', num_envs, out_dir)
+            run_plan.append(('hiutil', hi_rel, num_envs))
+        for num_envs in case_ladder:
+            run_plan.append(('default', base_agent, num_envs))
+
+        for variant, agent_cfg, num_envs in run_plan:
+            out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'{variant}_e{num_envs}'
+            res = run_one(case_name, arg_rel, agent_cfg, variant, num_envs, out_dir)
             case_runs.append(res)
-            print(f"  [TRY hiutil e{num_envs}] status={res['status']} min_avg={res.get('min_avg_util')} sps={res['samples_per_s']}", flush=True)
-            if res['status'] == 'ok':
-                selected = res
+            print(
+                f"  [TRY {variant} e{num_envs}] status={res['status']} "
+                f"min_avg={res.get('min_avg_util')} sps={res['samples_per_s']}",
+                flush=True,
+            )
+            if args.scan_policy == 'first_ok' and res['status'] == 'ok':
                 break
 
-        if selected is None:
-            for num_envs in case_ladder:
-                out_dir = root_out / 'runs' / case_name.replace('.txt', '') / f'default_e{num_envs}'
-                res = run_one(case_name, arg_rel, base_agent, 'default', num_envs, out_dir)
-                case_runs.append(res)
-                print(f"  [TRY default e{num_envs}] status={res['status']} min_avg={res.get('min_avg_util')} sps={res['samples_per_s']}", flush=True)
-                if res['status'] == 'ok':
-                    selected = res
-                    break
-
-        if selected is None:
-            selected = max(case_runs, key=lambda x: x.get('min_avg_util', -1)) if case_runs else {
-                'case': case_name, 'status': 'unrun'
-            }
+        selected, selection_reason, score = select_case_result(case_runs, args.objective, float(args.util_floor))
 
         selected = dict(selected)
         selected['method'] = case['method']
         selected['base_agent'] = base_agent
+        selected['objective'] = args.objective
+        selected['selection_reason'] = selection_reason
+        selected['score'] = round(float(score), 4)
         results.append(selected)
 
         with (root_out / 'progress.json').open('w') as f:
@@ -467,7 +538,7 @@ def main():
         'case', 'method', 'status', 'variant', 'num_envs', 'elapsed_s', 'iteration', 'samples', 'samples_per_s',
         'avg_util0', 'avg_util1', 'min_avg_util', 'max_util0', 'max_util1',
         'max_mem0', 'max_mem1', 'max_power0', 'max_power1',
-        'agent_config', 'base_agent', 'out_dir'
+        'agent_config', 'base_agent', 'objective', 'selection_reason', 'score', 'out_dir'
     ]
     with results_tsv.open('w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=fields, delimiter='\t', extrasaction='ignore')
@@ -475,7 +546,20 @@ def main():
         for r in results:
             w.writerow(r)
 
+    alloc_tsv = root_out / 'allocation_profile.tsv'
+    alloc_fields = [
+        'case', 'method', 'status', 'variant', 'num_envs',
+        'agent_config', 'base_agent', 'min_avg_util', 'samples_per_s',
+        'objective', 'selection_reason', 'score', 'out_dir',
+    ]
+    with alloc_tsv.open('w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=alloc_fields, delimiter='\t', extrasaction='ignore')
+        w.writeheader()
+        for r in results:
+            w.writerow(r)
+
     print(f"\\n[DONE] results={results_tsv}", flush=True)
+    print(f"[DONE] allocation_profile={alloc_tsv}", flush=True)
 
 
 if __name__ == '__main__':

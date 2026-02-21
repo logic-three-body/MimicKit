@@ -31,6 +31,7 @@ Core behavior:
 - NCCL stable env profile for train stages
 - Mesa GL/GLSL overrides for visualization stage
 - per-case adaptive env ladders with `amp_pi_plus` special ladder default
+- optional profile-driven case allocation from `allocation_profile.tsv`
 
 ## Longcycle One-Command Run
 
@@ -68,6 +69,29 @@ python -u scripts/run_case_longcycle.py \
   --root-out case_ultralong_full_$(date +%Y%m%d_%H%M%S)
 ```
 
+## Profile-Driven Longcycle (Recommended)
+
+Run short allocation first (`run_case_gpu_bench.py`), then inject profile:
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --allocation-profile-tsv output/train/case_gpu_alloc_<ts>/allocation_profile.tsv \
+  --allocation-fallback ladder \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out case_ultralong_alloc_$(date +%Y%m%d_%H%M%S)
+```
+
 ## Parameter Defaults
 
 - `--long-mode max_samples` (default)
@@ -85,6 +109,10 @@ python -u scripts/run_case_longcycle.py \
 - `--pi-plus-ladder 40,39,38,36,32,24,16,8,4,2,1`
 - `--amp-pi-plus-ladder 38,36,32,24,16,8,4,2,1`
 - `--resume-skip-status ok` (reuse finished cases in existing `root_out`)
+- `--allocation-profile-tsv ''` (empty disables profile injection)
+- `--allocation-fallback ladder`:
+  - `ladder`: if profile-selected attempt fails, continue with normal ladder
+  - `strict`: run only profile-selected config for profile-covered trainable cases
 
 `--resume-skip-status` modes:
 - `ok` (default): skip only cases whose previous `final_ok=1`
@@ -136,6 +164,7 @@ Behavior:
   - if `long_ok=1`, resume starts from test stage
   - if `test_ok=1`, resume starts from viz stage
   - if currently `in_progress_probe`, resume restarts probe stage
+- profile metadata (`alloc_*`) is persisted in attempts and reused on resume
 
 When to use other modes:
 - force full rerun: `--resume-skip-status none`
@@ -150,6 +179,7 @@ Includes:
 - `long_max_samples`
 - `long_budget_hours`, `long_budget_target_sec`, `long_budget_elapsed_sec`
 - `long_budget_reached`, `long_budget_signal`, `long_stop_reason`
+- `alloc_profile_used`, `alloc_variant`, `alloc_num_envs`, `alloc_agent_config`, `alloc_source`
 - `stage_elapsed_sec`
 - `final_ok`, `note`
 

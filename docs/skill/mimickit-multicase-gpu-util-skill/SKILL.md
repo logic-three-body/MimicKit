@@ -9,6 +9,7 @@ description: Benchmark MimicKit trainable cases for dual-GPU utilization on Newt
 
 Run all trainable cases from `args/*.txt` with a consistent dual-GPU benchmark protocol and produce:
 - per-case best config/result
+- per-case allocation profile for downstream longcycle runs
 - method-level classification summary
 - reusable command pattern for replay
 
@@ -51,12 +52,20 @@ cd /root/Project/MimicKit
 - tries env ladder:
   - default cases: `1024 -> 512 -> 256` (per GPU)
   - `pi_plus` cases: `1024 -> 768 -> 512 -> 384 -> 256 -> 192 -> 128 -> 96 -> 64 -> 48 -> 44 -> 40 -> 39 -> 38 -> 36 -> 32`
-- falls back to default agent ladder if hiutil fails
-- writes `best_by_case.tsv`
+- `amp_pi_plus` can use dedicated ladder via `--amp-pi-plus-ladder`
+- supports scan policy:
+  - `--scan-policy first_ok`: stop after first successful probe (legacy behavior)
+  - `--scan-policy full_scan`: evaluate all candidates then select by objective
+- supports objective:
+  - `--objective balanced` (default): first satisfy `--util-floor` then maximize `samples_per_s`
+  - `--objective util`: maximize `min_avg_util`
+  - `--objective sps`: maximize `samples_per_s`
+- writes `best_by_case.tsv` and `allocation_profile.tsv`
 
 3. Output location:
 - `output/train/case_gpu_bench_<timestamp>/case_manifest.tsv`
 - `output/train/case_gpu_bench_<timestamp>/best_by_case.tsv`
+- `output/train/case_gpu_bench_<timestamp>/allocation_profile.tsv`
 - per-run logs under `output/train/case_gpu_bench_<timestamp>/runs/...`
 
 4. Useful script options:
@@ -69,9 +78,36 @@ Key options:
 - `--cases`: run only selected cases (comma-separated)
 - `--env-ladder`: default case ladder
 - `--pi-plus-ladder`: dedicated ladder for `pi_plus`
+- `--amp-pi-plus-ladder`: dedicated ladder for `amp_pi_plus_args.txt`
+- `--objective`: `balanced|util|sps`
+- `--util-floor`: util threshold used by `balanced`
+- `--scan-policy`: `first_ok|full_scan`
 - `--max-seconds`: timeout per probe
 - `--iter-target`: bounded probe iterations
 - `--root-out`: deterministic output folder
+
+## Recommended Allocation Run (Balanced)
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+python -u scripts/run_case_gpu_bench.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --env-ladder 1024,768,512,384,256,192,128,64 \
+  --pi-plus-ladder 40,39,38,36,32,24,16,8,4,2,1 \
+  --amp-pi-plus-ladder 40,39,38,36,32,24,16,8,4,2,1 \
+  --objective balanced \
+  --util-floor 50 \
+  --scan-policy full_scan \
+  --max-seconds 420 \
+  --iter-target 8 \
+  --root-out case_gpu_alloc_$(date +%Y%m%d_%H%M%S)
+```
+
+Use `allocation_profile.tsv` from this run as input to longcycle:
+- `--allocation-profile-tsv output/train/<case_gpu_alloc_xxx>/allocation_profile.tsv`
 
 ## Classification Summary
 

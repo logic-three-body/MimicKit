@@ -1001,117 +1001,117 @@ def main():
                         print(f"  [TRY {variant_name} e{num_envs}] resume: skip long", flush=True)
 
                     eval_model = long_out / 'model.pt'
-                else:
-                    write_skip_log(long_log, 'SKIPPED: nontrainable case has no long train stage.')
-                    attempt['long_rc'] = 0
-                    attempt['long_ok'] = 1
-                    attempt['long_timeout'] = 0
-                    attempt['long_stop_reason'] = 'bootstrap_skipped_long'
-                    eval_model = probe_out / 'model.pt'
+            else:
+                write_skip_log(long_log, 'SKIPPED: nontrainable case has no long train stage.')
+                attempt['long_rc'] = 0
+                attempt['long_ok'] = 1
+                attempt['long_timeout'] = 0
+                attempt['long_stop_reason'] = 'bootstrap_skipped_long'
+                eval_model = probe_out / 'model.pt'
 
-                test_ready = False
-                if int(attempt.get('test_ok', 0)) == 1 and test_log.exists():
-                    test_ready = has_metric(test_log.read_text(errors='ignore'))
+            test_ready = False
+            if int(attempt.get('test_ok', 0)) == 1 and test_log.exists():
+                test_ready = has_metric(test_log.read_text(errors='ignore'))
 
-                if not test_ready:
-                    attempt['note'] = 'in_progress_test'
-                    all_attempts[attempt_idx] = attempt
-                    save_case_attempts(case_run_dir, all_attempts)
-
-                    test_cmd = [
-                        str(TRAIN_PY), str(RUN_PY),
-                        '--arg_file', arg_rel,
-                        '--engine_config', args.engine_config,
-                        '--mode', 'test',
-                        '--visualize', 'false',
-                        '--devices', 'cuda:0',
-                        '--num_envs', '1',
-                        '--test_episodes', str(args.test_episodes),
-                        '--model_file', str(eval_model),
-                    ]
-                    if agent_cfg:
-                        test_cmd.extend(['--agent_config', agent_cfg])
-
-                    test_rc, test_to, test_text, test_elapsed = run_cmd(
-                        test_cmd,
-                        env,
-                        ROOT,
-                        test_log,
-                        args.test_timeout,
-                    )
-                    test_ok = (test_rc == 0 and has_metric(test_text))
-                    attempt['test_rc'] = test_rc
-                    attempt['test_ok'] = int(test_ok)
-                    attempt['test_elapsed_sec'] = round(float(attempt.get('test_elapsed_sec', 0.0) or 0.0) + test_elapsed, 2)
-
-                    if not test_ok:
-                        attempt['note'] = 'test_timeout' if (test_rc == 124 or test_to) else 'test_failed'
-                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
-                        all_attempts[attempt_idx] = attempt
-                        save_case_attempts(case_run_dir, all_attempts)
-                        print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=fail", flush=True)
-                        continue
-                else:
-                    print(f"  [TRY {variant_name} e{num_envs}] resume: skip test", flush=True)
-
-                viz_ready = False
-                if int(attempt.get('viz_ok', 0)) == 1 and viz_log.exists():
-                    viz_ready = has_metric(viz_log.read_text(errors='ignore'))
-
-                if not viz_ready:
-                    attempt['note'] = 'in_progress_viz'
-                    all_attempts[attempt_idx] = attempt
-                    save_case_attempts(case_run_dir, all_attempts)
-
-                    viz_cmd = [
-                        str(TRAIN_PY), str(RUN_PY),
-                        '--arg_file', arg_rel,
-                        '--engine_config', args.engine_config,
-                        '--mode', 'test',
-                        '--visualize', 'true',
-                        '--devices', 'cuda:0',
-                        '--num_envs', '1',
-                        '--test_episodes', str(args.viz_episodes),
-                        '--model_file', str(eval_model),
-                    ]
-                    if agent_cfg:
-                        viz_cmd.extend(['--agent_config', agent_cfg])
-
-                    viz_env = dict(env)
-                    viz_env.update(MESA_ENV)
-                    viz_rc, viz_to, viz_text, viz_elapsed = run_cmd(
-                        viz_cmd,
-                        viz_env,
-                        ROOT,
-                        viz_log,
-                        args.viz_timeout,
-                    )
-                    viz_ok = (viz_rc == 0 and has_metric(viz_text))
-                    attempt['viz_rc'] = viz_rc
-                    attempt['viz_ok'] = int(viz_ok)
-                    attempt['viz_elapsed_sec'] = round(float(attempt.get('viz_elapsed_sec', 0.0) or 0.0) + viz_elapsed, 2)
-
-                    if not viz_ok:
-                        note = 'viz_timeout' if (viz_rc == 124 or viz_to) else 'viz_failed'
-                        if 'GLSL 1.50 is not supported' in viz_text:
-                            note = 'viz_glsl_version'
-                        attempt['note'] = note
-                        attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
-                        all_attempts[attempt_idx] = attempt
-                        save_case_attempts(case_run_dir, all_attempts)
-                        print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=ok viz=fail({note})", flush=True)
-                        continue
-                else:
-                    print(f"  [TRY {variant_name} e{num_envs}] resume: skip viz", flush=True)
-
-                attempt['final_ok'] = 1
-                attempt['note'] = 'ok'
-                attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+            if not test_ready:
+                attempt['note'] = 'in_progress_test'
                 all_attempts[attempt_idx] = attempt
                 save_case_attempts(case_run_dir, all_attempts)
-                final = attempt
-                print(f"  [TRY {variant_name} e{num_envs}] final=ok", flush=True)
-                break
+
+                test_cmd = [
+                    str(TRAIN_PY), str(RUN_PY),
+                    '--arg_file', arg_rel,
+                    '--engine_config', args.engine_config,
+                    '--mode', 'test',
+                    '--visualize', 'false',
+                    '--devices', 'cuda:0',
+                    '--num_envs', '1',
+                    '--test_episodes', str(args.test_episodes),
+                    '--model_file', str(eval_model),
+                ]
+                if agent_cfg:
+                    test_cmd.extend(['--agent_config', agent_cfg])
+
+                test_rc, test_to, test_text, test_elapsed = run_cmd(
+                    test_cmd,
+                    env,
+                    ROOT,
+                    test_log,
+                    args.test_timeout,
+                )
+                test_ok = (test_rc == 0 and has_metric(test_text))
+                attempt['test_rc'] = test_rc
+                attempt['test_ok'] = int(test_ok)
+                attempt['test_elapsed_sec'] = round(float(attempt.get('test_elapsed_sec', 0.0) or 0.0) + test_elapsed, 2)
+
+                if not test_ok:
+                    attempt['note'] = 'test_timeout' if (test_rc == 124 or test_to) else 'test_failed'
+                    attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                    all_attempts[attempt_idx] = attempt
+                    save_case_attempts(case_run_dir, all_attempts)
+                    print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=fail", flush=True)
+                    continue
+            else:
+                print(f"  [TRY {variant_name} e{num_envs}] resume: skip test", flush=True)
+
+            viz_ready = False
+            if int(attempt.get('viz_ok', 0)) == 1 and viz_log.exists():
+                viz_ready = has_metric(viz_log.read_text(errors='ignore'))
+
+            if not viz_ready:
+                attempt['note'] = 'in_progress_viz'
+                all_attempts[attempt_idx] = attempt
+                save_case_attempts(case_run_dir, all_attempts)
+
+                viz_cmd = [
+                    str(TRAIN_PY), str(RUN_PY),
+                    '--arg_file', arg_rel,
+                    '--engine_config', args.engine_config,
+                    '--mode', 'test',
+                    '--visualize', 'true',
+                    '--devices', 'cuda:0',
+                    '--num_envs', '1',
+                    '--test_episodes', str(args.viz_episodes),
+                    '--model_file', str(eval_model),
+                ]
+                if agent_cfg:
+                    viz_cmd.extend(['--agent_config', agent_cfg])
+
+                viz_env = dict(env)
+                viz_env.update(MESA_ENV)
+                viz_rc, viz_to, viz_text, viz_elapsed = run_cmd(
+                    viz_cmd,
+                    viz_env,
+                    ROOT,
+                    viz_log,
+                    args.viz_timeout,
+                )
+                viz_ok = (viz_rc == 0 and has_metric(viz_text))
+                attempt['viz_rc'] = viz_rc
+                attempt['viz_ok'] = int(viz_ok)
+                attempt['viz_elapsed_sec'] = round(float(attempt.get('viz_elapsed_sec', 0.0) or 0.0) + viz_elapsed, 2)
+
+                if not viz_ok:
+                    note = 'viz_timeout' if (viz_rc == 124 or viz_to) else 'viz_failed'
+                    if 'GLSL 1.50 is not supported' in viz_text:
+                        note = 'viz_glsl_version'
+                    attempt['note'] = note
+                    attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+                    all_attempts[attempt_idx] = attempt
+                    save_case_attempts(case_run_dir, all_attempts)
+                    print(f"  [TRY {variant_name} e{num_envs}] probe=ok long=ok test=ok viz=fail({note})", flush=True)
+                    continue
+            else:
+                print(f"  [TRY {variant_name} e{num_envs}] resume: skip viz", flush=True)
+
+            attempt['final_ok'] = 1
+            attempt['note'] = 'ok'
+            attempt['stage_elapsed_sec'] = round(prev_stage_elapsed + (time.time() - attempt_start), 2)
+            all_attempts[attempt_idx] = attempt
+            save_case_attempts(case_run_dir, all_attempts)
+            final = attempt
+            print(f"  [TRY {variant_name} e{num_envs}] final=ok", flush=True)
+            break
 
             if final is not None:
                 break

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import gymnasium.spaces as spaces
 
 from _bridge_common import build_runtime_context, choose_export_dir, save_json
 
@@ -101,6 +102,13 @@ def main() -> int:
     wrapper = ActorPolicyExportWrapper(ctx.agent)
     wrapper.eval()
 
+    action_low_tensor = None
+    action_high_tensor = None
+    action_space = ctx.env.get_action_space()
+    if isinstance(action_space, spaces.Box):
+        action_low_tensor = torch.from_numpy(np.asarray(action_space.low, dtype=np.float32).reshape(1, -1))
+        action_high_tensor = torch.from_numpy(np.asarray(action_space.high, dtype=np.float32).reshape(1, -1))
+
     obs, info = ctx.env.reset(None)
     if obs.ndim != 2:
         raise RuntimeError(f"unexpected obs rank: {obs.shape}")
@@ -114,6 +122,9 @@ def main() -> int:
         for frame_index in range(int(args.frames)):
             curr_obs = obs[0:1]
             action = wrapper(curr_obs)
+            if action_low_tensor is not None and action_high_tensor is not None:
+                action = torch.maximum(action, action_low_tensor.to(device=action.device, dtype=action.dtype))
+                action = torch.minimum(action, action_high_tensor.to(device=action.device, dtype=action.dtype))
 
             obs_np = _to_numpy_row(curr_obs)
             act_np = _to_numpy_row(action)

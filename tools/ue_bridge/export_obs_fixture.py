@@ -63,6 +63,41 @@ def _to_numpy_row(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().numpy().reshape(-1).astype(np.float32, copy=False)
 
 
+def _try_get_ref_action_from_env(env) -> np.ndarray | None:
+    """Extract current character DoF state for visual replay."""
+    try:
+        if not hasattr(env, "_get_char_id"):
+            return None
+        char_id = env._get_char_id()
+        dof_pos = env._engine.get_dof_pos(char_id)
+        if not torch.is_tensor(dof_pos):
+            return None
+        if dof_pos.ndim < 2 or dof_pos.shape[0] <= 0:
+            return None
+        return _to_numpy_row(dof_pos[0:1])
+    except Exception:
+        return None
+
+
+def _try_get_root_pose_from_env(env) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Extract current root position/rotation for UE world-space playback alignment."""
+    try:
+        if not hasattr(env, "_get_char_id"):
+            return None, None
+        char_id = env._get_char_id()
+        root_pos = env._engine.get_root_pos(char_id)
+        root_rot = env._engine.get_root_rot(char_id)
+        if not torch.is_tensor(root_pos) or not torch.is_tensor(root_rot):
+            return None, None
+        if root_pos.ndim < 2 or root_pos.shape[0] <= 0:
+            return None, None
+        if root_rot.ndim < 2 or root_rot.shape[0] <= 0:
+            return None, None
+        return _to_numpy_row(root_pos[0:1]), _to_numpy_row(root_rot[0:1])
+    except Exception:
+        return None, None
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fp:
@@ -136,6 +171,17 @@ def main() -> int:
                     "obs": [float(x) for x in obs_np.tolist()],
                 }
             )
+
+            ref_action_np = _try_get_ref_action_from_env(ctx.env)
+            if ref_action_np is not None and ref_action_np.size > 0:
+                obs_rows[-1]["ref_action"] = [float(x) for x in ref_action_np.tolist()]
+
+            root_pos_np, root_rot_np = _try_get_root_pose_from_env(ctx.env)
+            if root_pos_np is not None and root_pos_np.size > 0:
+                obs_rows[-1]["ref_root_pos"] = [float(x) for x in root_pos_np.tolist()]
+            if root_rot_np is not None and root_rot_np.size > 0:
+                obs_rows[-1]["ref_root_rot"] = [float(x) for x in root_rot_np.tolist()]
+
             action_rows.append(
                 {
                     "frame": frame_index,
@@ -154,6 +200,15 @@ def main() -> int:
 
     obs_dim = len(obs_rows[0]["obs"]) if obs_rows else 0
     act_dim = len(action_rows[0]["action"]) if action_rows else 0
+    ref_action_dim = 0
+    ref_root_pos_dim = 0
+    ref_root_rot_dim = 0
+    if obs_rows and isinstance(obs_rows[0].get("ref_action", None), list):
+        ref_action_dim = len(obs_rows[0]["ref_action"])
+    if obs_rows and isinstance(obs_rows[0].get("ref_root_pos", None), list):
+        ref_root_pos_dim = len(obs_rows[0]["ref_root_pos"])
+    if obs_rows and isinstance(obs_rows[0].get("ref_root_rot", None), list):
+        ref_root_rot_dim = len(obs_rows[0]["ref_root_rot"])
 
     out_dir = choose_export_dir(out_dir=args.out_dir, model_file=args.model_file)
 
@@ -181,6 +236,9 @@ def main() -> int:
         "shape": {
             "obs_dim": int(obs_dim),
             "act_dim": int(act_dim),
+            "ref_action_dim": int(ref_action_dim),
+            "ref_root_pos_dim": int(ref_root_pos_dim),
+            "ref_root_rot_dim": int(ref_root_rot_dim),
             "count": int(len(obs_rows)),
         },
         "files": {
@@ -194,11 +252,14 @@ def main() -> int:
     print(f"[OK] obs fixture exported: {obs_path}")
     print(f"[OK] reference actions exported: {act_path}")
     print(f"[OK] metadata: {meta_path}")
-    print(f"     count={meta['shape']['count']} obs_dim={meta['shape']['obs_dim']} act_dim={meta['shape']['act_dim']}")
+    print(
+        f"     count={meta['shape']['count']} "
+        f"obs_dim={meta['shape']['obs_dim']} act_dim={meta['shape']['act_dim']} "
+        f"root_pos_dim={meta['shape']['ref_root_pos_dim']} root_rot_dim={meta['shape']['ref_root_rot_dim']}"
+    )
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

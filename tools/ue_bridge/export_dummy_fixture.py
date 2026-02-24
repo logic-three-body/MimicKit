@@ -25,6 +25,46 @@ class ConstantPolicy(torch.nn.Module):
         return self.proj(obs)
 
 
+def _to_numpy_row(tensor: torch.Tensor) -> list[float]:
+    arr = tensor.detach().cpu().numpy().reshape(-1).astype("float32")
+    return [float(x) for x in arr.tolist()]
+
+
+def _try_get_ref_action_from_env(env) -> list[float] | None:
+    """Extract character DoF state as reference playback payload."""
+    try:
+        if not hasattr(env, "_get_char_id"):
+            return None
+        char_id = env._get_char_id()
+        dof_pos = env._engine.get_dof_pos(char_id)
+        if not torch.is_tensor(dof_pos):
+            return None
+        if dof_pos.ndim < 2 or dof_pos.shape[0] <= 0:
+            return None
+        return _to_numpy_row(dof_pos[0:1])
+    except Exception:
+        return None
+
+
+def _try_get_root_pose_from_env(env) -> tuple[list[float] | None, list[float] | None]:
+    """Extract root position / rotation for cross-engine world alignment."""
+    try:
+        if not hasattr(env, "_get_char_id"):
+            return None, None
+        char_id = env._get_char_id()
+        root_pos = env._engine.get_root_pos(char_id)
+        root_rot = env._engine.get_root_rot(char_id)
+        if not torch.is_tensor(root_pos) or not torch.is_tensor(root_rot):
+            return None, None
+        if root_pos.ndim < 2 or root_pos.shape[0] <= 0:
+            return None, None
+        if root_rot.ndim < 2 or root_rot.shape[0] <= 0:
+            return None, None
+        return _to_numpy_row(root_pos[0:1]), _to_numpy_row(root_rot[0:1])
+    except Exception:
+        return None, None
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('w', encoding='utf-8') as fp:
@@ -130,9 +170,23 @@ def main() -> int:
     with torch.no_grad():
         for frame_index in range(int(args.frames)):
             curr_obs = obs[0:1]
-            obs_np = curr_obs.detach().cpu().numpy().reshape(-1).astype('float32')
+            obs_payload = {
+                'frame': frame_index,
+                'episode': episode_index,
+                'obs': _to_numpy_row(curr_obs),
+            }
 
-            obs_rows.append({'frame': frame_index, 'episode': episode_index, 'obs': [float(x) for x in obs_np.tolist()]})
+            ref_action = _try_get_ref_action_from_env(ctx.env)
+            if ref_action is not None and len(ref_action) > 0:
+                obs_payload['ref_action'] = ref_action
+
+            ref_root_pos, ref_root_rot = _try_get_root_pose_from_env(ctx.env)
+            if ref_root_pos is not None and len(ref_root_pos) > 0:
+                obs_payload['ref_root_pos'] = ref_root_pos
+            if ref_root_rot is not None and len(ref_root_rot) > 0:
+                obs_payload['ref_root_rot'] = ref_root_rot
+
+            obs_rows.append(obs_payload)
             action_rows.append({'frame': frame_index, 'episode': episode_index, 'action': default_action})
 
             if isinstance(act_space, spaces.Box):

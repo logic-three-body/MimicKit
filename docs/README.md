@@ -15,6 +15,8 @@
 
 - `docs/guides/README_Newbie_TrainInferVisual_PaperCases.md`
 - `docs/guides/README_LearningPlan.md`
+- `docs/guides/README_VisualReproductionAcceptance.md`
+- `docs/guides/README_Paper_ConfigCaseCatalog.md`
 
 适合查：零基础学习路径、全量案例总览、统一使用流程。
 

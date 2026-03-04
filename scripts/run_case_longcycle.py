@@ -1000,7 +1000,8 @@ def main():
                     else:
                         print(f"  [TRY {variant_name} e{num_envs}] resume: skip long", flush=True)
 
-                    eval_model = long_out / 'model.pt'
+                # Trainable cases always evaluate from long-train checkpoint.
+                eval_model = long_out / 'model.pt'
             else:
                 write_skip_log(long_log, 'SKIPPED: nontrainable case has no long train stage.')
                 attempt['long_rc'] = 0

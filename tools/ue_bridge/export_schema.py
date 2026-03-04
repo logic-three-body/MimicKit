@@ -15,6 +15,7 @@ OBS_LAYOUT_TOKEN = (
     "[root_h?] + root_rot_obs + root_vel_obs + root_ang_vel_obs + "
     "joint_rot_obs + dof_vel + key_pos_flat?"
 )
+SCHEMA_VERSION = 1
 
 
 
@@ -45,6 +46,7 @@ def main() -> int:
     obs_dim = int(obs_space.shape[0]) if len(obs_space.shape) == 1 else int(obs_space.shape[-1])
 
     schema = {
+        "schema_version": SCHEMA_VERSION,
         "source": {
             "arg_file": str(ctx.arg_file),
             "env_config": ctx.args.parse_string("env_config"),

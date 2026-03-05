@@ -243,6 +243,34 @@ python mimickit/run.py --arg_file args/<case>.txt --mode test --visualize true -
 2. `view_motion_*` 是“动作数据可视化案例”，用于检查 motion 数据与渲染，不代表策略训练质量。
 3. `vault_*` 属于框架扩展示例（任务环境扩展），可用于验证方法泛化与障碍交互。
 4. 若目标是论文/README 视觉复现，请结合：`docs/guides/README_VisualReproductionAcceptance.md`。
+5. 训练预算建议使用“两阶段”：
+   - 先全量 `8h/case` 获取首轮结果与失败清单。
+   - 再对未达标案例补到 `24h/case`（重点关注 `pi_plus` 与通信敏感案例）。
+
+推荐命令模板（全案例）：
+
+```bash
+# pass-1: 8h
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 8 \
+  --long-success-policy budget_checkpoint \
+  --root-out case_ultralong_8h_<ts>
+
+# pass-2: 同 root 补到 24h
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-success-policy budget_checkpoint \
+  --root-out case_ultralong_8h_<ts> \
+  --resume-skip-status ok
+```
 
 ## 6. 维护方式
 

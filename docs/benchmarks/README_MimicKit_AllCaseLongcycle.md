@@ -39,6 +39,19 @@ Method breakdown:
   - `MESA_GL_VERSION_OVERRIDE=3.3`
   - `MESA_GLSL_VERSION_OVERRIDE=330`
 
+## Recommended Runtime Policy (8h -> 24h)
+
+For new full runs, prefer a staged budget:
+
+1. Pass-1 (`8h/case`): quickly get full-case coverage and first-pass quality snapshot.
+2. Pass-2 (`24h/case`): continue only unfinished/failed cases.
+3. Optional pass-2 extension: rerun selected already-passed cases for L3 quality tuning.
+
+Why:
+- much faster first complete snapshot
+- lower retrial cost on unstable cases
+- keeps long budget focused on difficult cases (typically pi_plus and unstable dual-GPU cases)
+
 ## Pi-Plus Stable Env Picks
 
 - `add_pi_plus_args.txt`: `hiutil e40`
@@ -74,9 +87,9 @@ for r in csv.DictReader(open(path), delimiter='\t'):
 PY
 ```
 
-## One-Command Reproduce
+## Reproduce Commands
 
-Fresh longcycle run:
+Fresh fixed-sample longcycle run:
 
 ```bash
 source /root/miniconda3/etc/profile.d/conda.sh
@@ -91,7 +104,7 @@ python -u scripts/run_case_longcycle.py \
   --root-out case_longcycle_$(date +%Y%m%d_%H%M%S)
 ```
 
-Ultralong run (`time_budget`, 24h per trainable case):
+Direct ultralong run (`time_budget`, 24h per trainable case):
 
 ```bash
 source /root/miniconda3/etc/profile.d/conda.sh
@@ -110,15 +123,73 @@ python -u scripts/run_case_longcycle.py \
   --root-out case_ultralong_full_$(date +%Y%m%d_%H%M%S)
 ```
 
-Resume after interruption (same root):
+Recommended staged ultralong run (`8h -> 24h`):
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+ROOT=case_ultralong_8h_$(date +%Y%m%d_%H%M%S)
+
+# pass-1: full run at 8h/case
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 8 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out "${ROOT}"
+
+# pass-2A: same root, continue unfinished/failed to 24h
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out "${ROOT}" \
+  --resume-skip-status ok
+```
+
+Optional pass-2B (selected quality-upgrade cases):
+
+```bash
+CASES="add_pi_plus_args.txt,amp_pi_plus_args.txt,deepmimic_pi_plus_ppo_args.txt"
+
+python -u scripts/run_case_longcycle.py \
+  --cases "${CASES}" \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out "${ROOT}" \
+  --resume-skip-status none
+```
+
+Resume after interruption (same root, generic):
 
 ```bash
 python -u scripts/run_case_longcycle.py \
   --engine-config data/engines/newton_engine.yaml \
   --devices-train cuda:0,cuda:1 \
   --include-nontrainable \
-  --long-max-samples 30000000 \
-  --root-out case_longcycle_full_20260212_211318 \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out case_ultralong_8h_<your_ts> \
   --resume-skip-status ok
 ```
 

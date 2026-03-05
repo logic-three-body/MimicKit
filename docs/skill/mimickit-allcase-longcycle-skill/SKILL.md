@@ -33,6 +33,19 @@ Core behavior:
 - per-case adaptive env ladders with `amp_pi_plus` special ladder default
 - optional profile-driven case allocation from `allocation_profile.tsv`
 
+## Recommended Budget Strategy (8h -> 24h)
+
+Use a two-pass schedule instead of forcing all trainable cases to 24h in one shot:
+
+1. Pass-1: run all cases with `--long-budget-hours 8` to quickly get full coverage.
+2. Pass-2A: resume the same root with `--long-budget-hours 24` to finish unfinished/failed cases.
+3. Pass-2B: for cases already `final_ok=1` but still below expected visual quality, rerun selected cases from existing `long_train/model.pt` checkpoint.
+
+Why:
+- shortens first full snapshot turnaround (typically from multi-week to multi-day)
+- preserves checkpoint continuity
+- keeps expensive 24h budget focused on difficult or high-value cases
+
 ## Longcycle One-Command Run
 
 ```bash
@@ -48,9 +61,9 @@ python -u scripts/run_case_longcycle.py \
   --root-out case_longcycle_$(date +%Y%m%d_%H%M%S)
 ```
 
-## Time-Budget Ultralong Mode (24h Per Trainable Case)
+## Time-Budget Mode (Direct 24h)
 
-Use this mode for near-infinite long training with automatic stage switch to `test` / `viz`.
+Use this mode when you intentionally want one-shot 24h per trainable case.
 
 ```bash
 source /root/miniconda3/etc/profile.d/conda.sh
@@ -68,6 +81,69 @@ python -u scripts/run_case_longcycle.py \
   --long-success-policy budget_checkpoint \
   --root-out case_ultralong_full_$(date +%Y%m%d_%H%M%S)
 ```
+
+## Two-Pass Time-Budget Run (Recommended)
+
+Pass-1: all cases at 8h.
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mimickit
+cd /root/Project/MimicKit
+
+ROOT=case_ultralong_8h_$(date +%Y%m%d_%H%M%S)
+
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 8 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out "${ROOT}"
+```
+
+Pass-2A: same root, raise budget to 24h, continue unfinished/failed cases.
+
+```bash
+python -u scripts/run_case_longcycle.py \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out "${ROOT}" \
+  --resume-skip-status ok
+```
+
+Pass-2B: optional selected-case extension from existing checkpoints.
+
+```bash
+CASES="add_pi_plus_args.txt,amp_pi_plus_args.txt,deepmimic_pi_plus_ppo_args.txt"
+
+python -u scripts/run_case_longcycle.py \
+  --cases "${CASES}" \
+  --engine-config data/engines/newton_engine.yaml \
+  --devices-train cuda:0,cuda:1 \
+  --include-nontrainable \
+  --long-mode time_budget \
+  --long-budget-hours 24 \
+  --long-budget-signal SIGINT \
+  --long-budget-grace-sec 300 \
+  --long-success-policy budget_checkpoint \
+  --root-out "${ROOT}" \
+  --resume-skip-status none
+```
+
+Notes:
+- Pass-2A with `--resume-skip-status ok` skips already `final_ok=1` cases.
+- Pass-2B with `--resume-skip-status none` is used when you want to continue quality tuning for selected already-passed cases.
+- trainable long stage will prefer existing `long_train/model.pt` as `--model_file` when present.
 
 ## Profile-Driven Longcycle (Recommended)
 
@@ -113,6 +189,9 @@ python -u scripts/run_case_longcycle.py \
 - `--allocation-fallback ladder`:
   - `ladder`: if profile-selected attempt fails, continue with normal ladder
   - `strict`: run only profile-selected config for profile-covered trainable cases
+- recommended practice:
+  - pass-1 use `--long-budget-hours 8`
+  - pass-2 use `--long-budget-hours 24` only for unfinished or selected quality-upgrade cases
 
 `--resume-skip-status` modes:
 - `ok` (default): skip only cases whose previous `final_ok=1`
@@ -165,6 +244,9 @@ Behavior:
   - if `test_ok=1`, resume starts from viz stage
   - if currently `in_progress_probe`, resume restarts probe stage
 - profile metadata (`alloc_*`) is persisted in attempts and reused on resume
+- in `time_budget` mode, remaining budget is computed from:
+  - `long_budget_target_sec - long_budget_elapsed_sec`
+  - then long stage continues from existing long checkpoint when available
 
 When to use other modes:
 - force full rerun: `--resume-skip-status none`

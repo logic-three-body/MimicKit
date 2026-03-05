@@ -19,6 +19,7 @@
 - `docs/guides/README_Paper_ConfigCaseCatalog.md`
 
 适合查：零基础学习路径、全量案例总览、统一使用流程。
+推荐先读：`docs/guides/README_VisualReproductionAcceptance.md` 中的 `8h -> 24h` 预算策略，再开始全案例长周期运行。
 
 ## 3. `docs/benchmarks/`（案例与性能评测）
 

@@ -6,6 +6,7 @@ This folder contains the UE bridge tooling for the `MimicKit` -> `UE5` workflow:
 - `export_actor_onnx.py`
 - `serve_inference.py`
 - `convert_ue_trace_to_mimickit.py`
+- `build_mimickit_render_sequences.py`
 
 ## Evidence Anchors
 
@@ -81,6 +82,39 @@ Outputs:
 - `ue_trace_dataset.npz`
 - `ue_trace_dataset.jsonl`
 - `ue_trace_dataset_summary.json`
+
+### 5) Build per-case inference render frame sequences
+
+```bash
+python tools/ue_bridge/build_mimickit_render_sequences.py \
+  --train-root output/train \
+  --img-root output/img \
+  --root-scope all \
+  --frames 300 \
+  --frame-stride 5 \
+  --device cuda:0 \
+  --num-envs 1
+```
+
+Key behavior:
+
+- Discover from `output/train/*/best_by_case.tsv` and keep only `final_ok=1`.
+- Mirror run hierarchy from `output/train/<root>/...` into `output/img/<root>/...`.
+- Export render frames at `frame_XXXXXX.png` every `frame_stride` steps.
+- Write per-root and global indices:
+  - `output/img/<root>/infer_viz_index.tsv`
+  - `output/img/render_all_roots.tsv`
+
+Useful flags:
+
+- `--dry-run`: discovery/index planning only.
+- `--resume` / `--force`: incremental rerun or full rebuild.
+- `--roots` / `--cases`: whitelist execution scope.
+
+Runtime notes:
+
+- Inference renderer uses headless viewer mode by default (`MIMICKIT_VIEWER_HEADLESS=1`).
+- If Isaac Gym engine config is resolved but `isaacgym` is unavailable, render export falls back to `data/engines/newton_engine.yaml`.
 
 ## Explicit Gaps
 

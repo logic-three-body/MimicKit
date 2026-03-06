@@ -50,6 +50,39 @@ Per training run, bridge artifacts are stored under:
 - `onnx_export_meta.json`
 - optional trace conversions
 
+## Inference Render Sequence Baseline
+
+Batch inference visualization is exported by:
+
+`tools/ue_bridge/build_mimickit_render_sequences.py`
+
+Locked defaults:
+
+- `train_root=output/train`
+- `img_root=output/img`
+- `root_scope=all` (all timestamp roots)
+- `frames=300`
+- `frame_stride=5`
+- `device=cuda:0`
+- `num_envs=1`
+- `resume=true`
+
+Discovery rule:
+
+- Only rows with `final_ok=1` in `output/train/*/best_by_case.tsv` are rendered.
+
+Output contracts:
+
+- `output/img/<root>/runs/<case>/<variant>/render/frames/frame_000000.png`
+- `output/img/<root>/runs/<case>/<variant>/render/render_meta.json`
+- `output/img/<root>/infer_viz_index.tsv`
+- `output/img/render_all_roots.tsv`
+
+Execution notes:
+
+- The exporter forces headless viewer mode (`MIMICKIT_VIEWER_HEADLESS=1`) and applies a non-MSAA fallback for WSL/headless OpenGL stacks.
+- If an Isaac engine config is resolved but `isaacgym` is unavailable, the exporter falls back to `data/engines/newton_engine.yaml` for render-only sequence generation.
+
 ## Explicit Gaps (Evidence-based)
 
 - No built-in ONNX exporter in MimicKit core (`onnx`, `torch.onnx` search under `MimicKit/**`)
